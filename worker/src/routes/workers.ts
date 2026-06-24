@@ -487,7 +487,7 @@ app.post('/:accountId/pages/deploy', async (c) => {
   deployForm.append('commit_message', 'Deploy via CF Manager');
 
   for (const sf of specialFiles) {
-    deployForm.append(sf.name, new Blob([sf.buffer]), sf.name);
+    deployForm.append(sf.name, new Blob([sf.buffer], { type: 'application/octet-stream' }), sf.name);
   }
 
   const resp = await cfFetchRaw(account, `/accounts/${account.account_id}/pages/projects/${name}/deployments`, c.env.ENCRYPTION_KEY, {
@@ -593,7 +593,7 @@ app.post('/batch-deploy-pages', async (c) => {
       deployForm.append('branch', 'main');
       deployForm.append('commit_message', 'Batch deploy via CF Manager');
       for (const sf of specialFiles) {
-        deployForm.append(sf.name, new Blob([sf.buffer]), sf.name);
+        deployForm.append(sf.name, new Blob([sf.buffer], { type: 'application/octet-stream' }), sf.name);
       }
 
       const resp = await cfFetchRaw(account, `/accounts/${account.account_id}/pages/projects/${t.workerName}/deployments`, c.env.ENCRYPTION_KEY, {

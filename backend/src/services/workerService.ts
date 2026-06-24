@@ -532,7 +532,7 @@ export async function deployPages(
     const isSpecial = SPECIAL_FILES.has(basename) && !f.path.includes('/');
     appLogger.info(`[Pages Deploy] File: "${f.path}" | basename: "${basename}" | isSpecial: ${isSpecial} | size: ${f.buffer.length} bytes`);
     if (isSpecial) {
-      params[basename] = new File([new Uint8Array(f.buffer)], basename);
+      params[basename] = new File([new Uint8Array(f.buffer)], basename, { type: 'application/octet-stream' });
     } else {
       manifest[f.path] = crypto.createHash('sha256').update(f.buffer).digest('hex');
       params[f.path] = new File([new Uint8Array(f.buffer)], f.path, { type: 'application/octet-stream' });
