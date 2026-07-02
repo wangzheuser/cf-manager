@@ -282,6 +282,40 @@ async function handleTest(row: any) {
   message.success('连接测试成功');
 }
 
+async function handleTestBatch() {
+  batchTesting.value = true;
+  batchResult.value = null;
+  try {
+    const onlyUnverified = accountStore.filter === 'unverified';
+    const result = await accountStore.testBatch({ onlyUnverified });
+    batchResult.value = result;
+    showBatchResultModal.value = true;
+    const s = result.summary;
+    message.success(`批量测试完成：成功 ${s.success}，失败 ${s.error}`);
+  } catch (e: any) {
+    message.error(`批量测试失败：${e?.message || e}`);
+  } finally {
+    batchTesting.value = false;
+  }
+}
+
+const batchResultColumns: DataTableColumns<any> = [
+  { title: 'ID', key: 'id', width: 60 },
+  { title: '名称', key: 'name', width: 150 },
+  {
+    title: '结果', key: 'status', width: 90,
+    render: (row) => {
+      const map: Record<string, { type: any; text: string }> = {
+        success: { type: 'success', text: '成功' },
+        error: { type: 'error', text: '失败' },
+      };
+      const m = map[row.status] || { type: 'default', text: row.status };
+      return h(NTag, { size: 'small', type: m.type, bordered: false }, { default: () => m.text });
+    },
+  },
+  { title: '说明', key: 'message', ellipsis: { tooltip: true }, render: (row) => row.message || '-' },
+];
+
 async function handleDelete(row: any) {
   await accountStore.deleteAccount(row.id);
   message.success('已删除');
