@@ -8,13 +8,13 @@ import { responseWrapper } from './middleware/responseWrapper';
 import accountsRouter from './routes/accounts';
 import dnsRouter from './routes/dns';
 import workersRouter from './routes/workers';
-import aiRouter from './routes/ai';
 import browserRenderRouter from './routes/browserRender';
 import settingsRouter from './routes/settings';
 import storageRouter from './routes/storage';
 import tasksRouter from './routes/tasks';
 import openaiRouter from './routes/openai';
 import externalBrowserRenderRouter from './routes/externalBrowserRender';
+import aiRouter from './routes/ai';
 import { getQuotaSummary, syncUsageFromCloudflare } from './services/quotaTracker';
 import { getRecentLogs } from './models/auditLog';
 import { initScheduler } from './services/taskScheduler';
@@ -35,22 +35,26 @@ app.get('/api/health', (_req, res) => {
 
 app.use(authMiddleware);
 
+// External APIs — no responseWrapper, keep original format
+// Mount BEFORE /api middleware to avoid responseWrapper
+app.use('/v1', v1RequestLogger);
+app.use('/v1', openaiRouter);
+app.use('/v1/browser', externalBrowserRenderRouter);
+
+// Internal APIs — with responseWrapper
 app.use('/api', apiRequestLogger);
 app.use('/api', responseWrapper);
 
 app.use('/api/accounts', accountsRouter);
 app.use('/api/dns', dnsRouter);
 app.use('/api/workers', workersRouter);
-app.use('/api/ai', aiRouter);
 app.use('/api/browser-render', browserRenderRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/storage', storageRouter);
 app.use('/api/tasks', tasksRouter);
-
-// External APIs — no responseWrapper, keep original format
-app.use('/v1', v1RequestLogger);
-app.use('/v1', openaiRouter);
-app.use('/v1/browser', externalBrowserRenderRouter);
+app.use('/api/ai', aiRouter);
+app.use('/api/v1', v1RequestLogger);
+app.use('/api/v1', openaiRouter);
 
 app.get('/api/quota', async (_req, res, next) => {
   try {

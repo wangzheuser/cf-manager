@@ -148,7 +148,6 @@
 <script setup lang="ts">
 import { ref, reactive, watch, onMounted, nextTick } from 'vue';
 import { useMessage } from 'naive-ui';
-import { aiApi } from '../api/ai';
 import { accountsApi } from '../api/accounts';
 
 interface AiUsageItem {
@@ -200,7 +199,7 @@ async function fetchAccounts() {
     const { data } = await accountsApi.getAll();
     const accounts = (data.accounts || []).filter((a: any) => a.is_active && (a.enabled_features || '').includes('ai')).map((a: any) => ({
       label: a.name,
-      value: String(a.id),
+      value: a.account_id || String(a.id), // Use account_id (Cloudflare ID) for AI requests
     }));
     accountOptions.value = [
       { label: '🤖 自动分配', value: 'auto' },
@@ -214,14 +213,21 @@ async function fetchAccounts() {
 async function fetchModels() {
   modelsLoading.value = true;
   try {
-    const params: any = { task: 'Text Generation' };
-    if (selectedAccount.value && selectedAccount.value !== 'auto') params.accountId = selectedAccount.value;
-    const { data } = await aiApi.getModels(params);
-    modelOptions.value = (data.models || data || []).map((m: any) => {
-      const fullName = typeof m === 'string' ? m : (m.name || m.id);
+    const token = localStorage.getItem('api_token');
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    
+    // Filter to only text-generation models (chat/completions compatible)
+    const response = await fetch('/api/v1/models?task=text-generation', { headers });
+    if (!response.ok) throw new Error(`Failed to fetch models: ${response.status}`);
+    
+    const data = await response.json();
+    modelOptions.value = (data.data || []).map((m: any) => {
+      const fullName = m.id || m.name;
       const shortName = fullName.replace(/^@cf\//, '');
       return { label: shortName, value: fullName };
     });
+    
     if (modelOptions.value.length && !modelOptions.value.find(o => o.value === selectedModel.value)) {
       selectedModel.value = modelOptions.value[0].value;
     }
@@ -261,16 +267,23 @@ async function sendMessage() {
     const token = localStorage.getItem('api_token');
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    const response = await fetch('/api/ai/inference', {
+    
+    // Build messages array (exclude loading messages)
+    const historyMessages = messages.value
+      .filter(m => !m.loading)
+      .slice(0, -1) // exclude current user message, will be added below
+      .map(m => ({ role: m.role, content: m.content }));
+    
+    const response = await fetch('/api/v1/chat/completions', {
       method: 'POST',
-      headers,
+      headers: {
+        ...headers,
+        ...(selectedAccount.value && selectedAccount.value !== 'auto' ? { 'X-Account-ID': selectedAccount.value } : {}),
+      },
       body: JSON.stringify({
         model: selectedModel.value,
-        prompt: currentPrompt,
-        accountId: (selectedAccount.value && selectedAccount.value !== 'auto') ? Number(selectedAccount.value) : undefined,
-        messages: messages.value
-          .filter(m => !m.loading)
-          .map(m => ({ role: m.role, content: m.content })),
+        messages: [...historyMessages, { role: 'user', content: currentPrompt }],
+        stream: true,
       }),
       signal: abortController.signal,
     });
@@ -303,18 +316,27 @@ async function sendMessage() {
           }
           try {
             const parsed = JSON.parse(data);
-            if (parsed.type === 'reasoning' && parsed.chunk) {
-              aiMsg.reasoning = (aiMsg.reasoning || '') + parsed.chunk;
+            const delta = parsed?.choices?.[0]?.delta;
+            
+            if (delta?.reasoning_content || delta?.reasoning) {
+              // Reasoning/thinking content
+              const reasoningText = delta.reasoning_content || delta.reasoning;
+              aiMsg.reasoning = (aiMsg.reasoning || '') + reasoningText;
               aiMsg.reasoningExpanded = true;
               await nextTick();
               await waitFrame(); // 等浏览器绘制
-            } else if (parsed.type === 'content' && parsed.chunk) {
+            }
+            
+            if (delta?.content) {
+              // Actual response content
               aiMsg.thinkingDone = true;
-              aiMsg.content += parsed.chunk;
+              aiMsg.content += delta.content;
               await nextTick();
               await waitFrame(); // 等浏览器绘制
-            } else if (parsed.error) {
-              message.error(parsed.error);
+            }
+            
+            if (parsed.error) {
+              message.error(parsed.error.message || JSON.stringify(parsed.error));
             }
           } catch (e) {
             console.warn('Failed to parse SSE:', data);
@@ -359,7 +381,16 @@ function scrollToBottom() {
 
 async function fetchUsage() {
   try {
-    const { data } = await aiApi.getUsage();
+    const token = localStorage.getItem('api_token');
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    
+    const response = await fetch('/api/ai/usage', { headers });
+    if (!response.ok) throw new Error(`Failed to fetch usage: ${response.status}`);
+    
+    const result = await response.json();
+    // Handle both wrapped { success, data } and unwrapped array formats
+    const data = result.data || result;
     usageData.value = (data || []).map((d: any) => ({ ...d, expanded: false }));
   } catch {
     usageData.value = [];

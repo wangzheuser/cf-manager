@@ -137,7 +137,14 @@ export async function getAccountsByPriority(resource: ResourceType): Promise<Acc
     .map(r => r.account);
 }
 
-export function clearCache(): void {
-  zonesCache.flushAll();
-  quotaCache.flushAll();
+export function clearCache(resource?: ResourceType): void {
+  if (resource) {
+    // Only clear quota cache for the specified resource (precision clear)
+    const cacheKey = `best_account_${resource}`;
+    quotaCache.del(cacheKey);
+  } else {
+    // Clear all caches (backward compatibility)
+    zonesCache.flushAll();
+    quotaCache.flushAll();
+  }
 }

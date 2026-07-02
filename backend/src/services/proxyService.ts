@@ -60,20 +60,56 @@ export function getHttpAgent(): Agent | undefined {
   return cachedAgent;
 }
 
-export async function proxyFetch(input: string | URL, init?: any): Promise<FetchResponse> {
+export async function proxyFetch(input: string | URL, init?: any, timeoutMs: number = 300000): Promise<FetchResponse> {
   const agent = getHttpAgent();
-  if (!agent) return fetch(input, init) as unknown as FetchResponse;
-
-  const doFetch = () => nodeFetch(input.toString(), { ...init, agent });
+  
+  // Create AbortController for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  
   try {
-    return await doFetch() as unknown as FetchResponse;
+    if (!agent) {
+      const response = await fetch(input, { ...init, signal: controller.signal }) as unknown as FetchResponse;
+      clearTimeout(timeoutId);
+      return response;
+    }
+
+    const doFetch = () => nodeFetch(input.toString(), { ...init, agent, timeout: timeoutMs });
+    const result = await doFetch() as unknown as FetchResponse;
+    clearTimeout(timeoutId);
+    return result;
   } catch (err: any) {
+    clearTimeout(timeoutId);
+    
     if (err.code === 'ECONNRESET' || err.code === 'EPIPE') {
       cachedAgent = undefined;
       cachedUrl = '';
       const newAgent = getHttpAgent();
-      return await nodeFetch(input.toString(), { ...init, agent: newAgent }) as unknown as FetchResponse;
+      // Retry with new agent
+      const retryController = new AbortController();
+      const retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
+      try {
+        if (!newAgent) {
+          const response = await fetch(input, { ...init, signal: retryController.signal }) as unknown as FetchResponse;
+          clearTimeout(retryTimeoutId);
+          return response;
+        }
+        const result = await nodeFetch(input.toString(), { ...init, agent: newAgent, timeout: timeoutMs }) as unknown as FetchResponse;
+        clearTimeout(retryTimeoutId);
+        return result;
+      } catch (retryErr) {
+        clearTimeout(retryTimeoutId);
+        throw retryErr;
+      }
     }
+    
+    // Handle timeout error
+    if (err.name === 'AbortError' || err.type === 'request-timeout') {
+      const timeoutErr = new Error(`Request timeout after ${timeoutMs}ms`);
+      timeoutErr.name = 'TimeoutError';
+      throw timeoutErr;
+    }
+    
     throw err;
   }
 }

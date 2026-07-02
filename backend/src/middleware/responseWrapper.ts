@@ -8,6 +8,11 @@ export function responseWrapper(_req: Request, res: Response, next: NextFunction
   const originalJson = res.json.bind(res);
 
   res.json = function (body: any) {
+    // Skip wrapping for OpenAI format responses (returned by /api/v1/* routes)
+    if (body && typeof body === 'object' && (body.object === 'list' || body.object === 'chat.completion' || body.id?.startsWith('chatcmpl-'))) {
+      return originalJson(body);
+    }
+    
     if (body && typeof body === 'object' && body.success !== undefined) {
       if (body.data !== undefined || body.error !== undefined) {
         return originalJson(body);
