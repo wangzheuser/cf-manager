@@ -54,6 +54,66 @@ export async function getAllAccounts(db: D1Database): Promise<Account[]> {
   return results;
 }
 
+export type AccountListFilter = 'all' | 'active' | 'unverified';
+
+export interface PagedAccounts {
+  accounts: Account[];
+  total: number;
+  counts: { all: number; active: number; unverified: number };
+}
+
+/**
+ * 分页查询账户，支持按 active/unverified 筛选 + 按名称/邮箱模糊搜索
+ */
+export async function listAccountsPaged(db: D1Database, opts: {
+  page: number;
+  pageSize: number;
+  filter?: AccountListFilter;
+  search?: string;
+}): Promise<PagedAccounts> {
+  const page = Math.max(1, opts.page || 1);
+  const pageSize = Math.max(1, Math.min(500, opts.pageSize || 20));
+  const filter = opts.filter || 'all';
+  const search = (opts.search || '').trim();
+
+  const where: string[] = [];
+  const params: any[] = [];
+  if (filter === 'active') {
+    where.push('is_active = 1');
+  } else if (filter === 'unverified') {
+    where.push('is_active = 0');
+  }
+  if (search) {
+    where.push('(name LIKE ? OR email LIKE ?)');
+    params.push(`%${search}%`, `%${search}%`);
+  }
+  const whereSql = where.length > 0 ? 'WHERE ' + where.join(' AND ') : '';
+
+  const totalRow = await db.prepare(`SELECT COUNT(*) as c FROM accounts ${whereSql}`).bind(...params).first<{ c: number }>();
+  const total = totalRow?.c ?? 0;
+  const offset = (page - 1) * pageSize;
+  const { results } = await db
+    .prepare(`SELECT * FROM accounts ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+    .bind(...params, pageSize, offset)
+    .all<Account>();
+
+  const [allRow, activeRow, unverifiedRow] = await Promise.all([
+    db.prepare('SELECT COUNT(*) as c FROM accounts').first<{ c: number }>(),
+    db.prepare('SELECT COUNT(*) as c FROM accounts WHERE is_active = 1').first<{ c: number }>(),
+    db.prepare('SELECT COUNT(*) as c FROM accounts WHERE is_active = 0').first<{ c: number }>(),
+  ]);
+
+  return {
+    accounts: results,
+    total,
+    counts: {
+      all: allRow?.c ?? 0,
+      active: activeRow?.c ?? 0,
+      unverified: unverifiedRow?.c ?? 0,
+    },
+  };
+}
+
 export async function getAccountById(db: D1Database, id: number): Promise<Account | null> {
   return db.prepare('SELECT * FROM accounts WHERE id = ?').bind(id).first<Account>();
 }
@@ -86,6 +146,26 @@ export async function updateAccount(db: D1Database, id: number, data: Partial<Ac
 
 export async function deleteAccount(db: D1Database, id: number): Promise<void> {
   await db.prepare('DELETE FROM accounts WHERE id = ?').bind(id).run();
+}
+
+export async function getAccountByEmail(db: D1Database, email: string): Promise<Account | null> {
+  return db.prepare('SELECT * FROM accounts WHERE email = ?').bind(email).first<Account>();
+}
+
+/**
+ * 从邮箱中提取账户名：
+ * - lauren.bailey2701@maildrop.cc -> bailey2701
+ * - laurenbailey2701@maildrop.cc -> laurenbailey2701
+ * - lauren.b.bailey2701@maildrop.cc -> bailey2701 (取最后一段)
+ */
+export function nameFromEmail(email: string): string {
+  const localPart = (email.split('@')[0] || '').trim().toLowerCase();
+  if (!localPart) return '';
+  const parts = localPart.split('.');
+  if (parts.length <= 1) {
+    return localPart;
+  }
+  return parts[parts.length - 1];
 }
 
 // ============ Quota queries ============

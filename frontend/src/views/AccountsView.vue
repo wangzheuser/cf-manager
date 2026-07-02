@@ -2,7 +2,35 @@
   <div>
     <n-space justify="space-between" align="center">
       <n-h2>账号管理</n-h2>
-      <n-button type="primary" @click="showAddModal = true">添加账号</n-button>
+      <n-space>
+        <n-button @click="showImportModal = true">导入 CSV</n-button>
+        <n-button type="primary" @click="showAddModal = true">添加账号</n-button>
+      </n-space>
+    </n-space>
+
+    <n-space align="center" :size="12" style="margin: 12px 0;">
+      <n-button-group size="small">
+        <n-button :type="accountStore.filter === 'all' ? 'primary' : 'default'" @click="handleFilterChange('all')">全部 ({{ accountStore.counts.all }})</n-button>
+        <n-button :type="accountStore.filter === 'active' ? 'primary' : 'default'" @click="handleFilterChange('active')">活跃 ({{ accountStore.counts.active }})</n-button>
+        <n-button :type="accountStore.filter === 'unverified' ? 'primary' : 'default'" @click="handleFilterChange('unverified')">未验证 ({{ accountStore.counts.unverified }})</n-button>
+      </n-button-group>
+      <n-button
+        size="small"
+        type="warning"
+        :loading="batchTesting"
+        :disabled="accountStore.filter === 'unverified' && accountStore.counts.unverified === 0"
+        @click="handleTestBatch"
+      >
+        批量测试{{ accountStore.filter === 'unverified' ? '未验证' : '全部' }}账户
+      </n-button>
+      <n-input
+        v-model:value="searchInput"
+        size="small"
+        placeholder="搜索名称/邮箱"
+        clearable
+        style="width: 200px;"
+        @update:value="handleSearchInput"
+      />
     </n-space>
 
     <n-data-table
@@ -11,6 +39,9 @@
       :loading="accountStore.loading"
       :bordered="false"
       :scroll-x="700"
+      :pagination="paginationConfig"
+      :remote="true"
+      :row-key="(row: any) => row.id"
     />
 
     <n-modal v-model:show="showAddModal" preset="dialog" title="添加账号" style="width: 500px; max-width: 95vw">
@@ -55,22 +86,126 @@
         <n-button type="primary" :loading="submitting" @click="handleSaveFeatures">保存</n-button>
       </template>
     </n-modal>
+
+    <n-modal v-model:show="showImportModal" preset="dialog" title="导入 CSV" style="width: 700px; max-width: 95vw">
+      <n-space vertical :size="16">
+        <n-alert type="info" :bordered="false">
+          CSV 表头须包含 <n-text code>email</n-text> 和 <n-text code>apiKey</n-text>（可选 <n-text code>password</n-text>）。
+          系统会按邮箱去重；账户名自动从邮箱提取（如 lauren.bailey2701@xx → bailey2701）；单个账户错误不影响其他账户导入。
+        </n-alert>
+        <n-upload
+          :max="1"
+          accept=".csv,text/csv,text/plain"
+          :default-upload="false"
+          :show-file-list="true"
+          v-model:file-list="importFileList"
+        >
+          <n-button>选择 CSV 文件</n-button>
+        </n-upload>
+        <n-checkbox v-model:checked="skipVerify">
+          跳过凭证验证（秒级完成，后续逐个「测试」激活；适合大批量导入）
+        </n-checkbox>
+        <n-alert v-if="importing" type="info" :bordered="false">
+          正在处理中，请耐心等待…（并发批处理，每批 5 条；跳过验证时每批 20 条）
+        </n-alert>
+        <n-space v-if="importResult">
+          <n-statistic label="总计" :value="importResult.summary.total" />
+          <n-statistic label="成功" :value="importResult.summary.success" />
+          <n-statistic label="跳过" :value="importResult.summary.skipped" />
+          <n-statistic label="失败" :value="importResult.summary.error" />
+        </n-space>
+        <n-data-table
+          v-if="importResult"
+          :columns="importResultColumns"
+          :data="importResult.results"
+          :bordered="false"
+          size="small"
+          :max-height="300"
+        />
+      </n-space>
+      <template #action>
+        <n-button @click="closeImportModal">关闭</n-button>
+        <n-button type="primary" :loading="importing" :disabled="!importFile" @click="handleImport">开始导入</n-button>
+      </template>
+    </n-modal>
+
+    <n-modal v-model:show="showBatchResultModal" preset="dialog" title="批量测试结果" style="width: 700px; max-width: 95vw">
+      <n-space vertical :size="16">
+        <n-space>
+          <n-statistic label="总计" :value="batchResult?.summary.total ?? 0" />
+          <n-statistic label="成功" :value="batchResult?.summary.success ?? 0" />
+          <n-statistic label="失败" :value="batchResult?.summary.error ?? 0" />
+        </n-space>
+        <n-data-table
+          v-if="batchResult"
+          :columns="batchResultColumns"
+          :data="batchResult.results"
+          :bordered="false"
+          size="small"
+          :max-height="300"
+        />
+      </n-space>
+      <template #action>
+        <n-button type="primary" @click="showBatchResultModal = false">关闭</n-button>
+      </template>
+    </n-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, h, onMounted } from 'vue';
+import { ref, h, computed, onMounted } from 'vue';
 import { NButton, NSpace, NTag, useMessage } from 'naive-ui';
 import type { DataTableColumns } from 'naive-ui';
+import type { UploadFileInfo } from 'naive-ui';
 import { useAccountStore } from '../stores/accountStore';
 
 const accountStore = useAccountStore();
 const message = useMessage();
 const showAddModal = ref(false);
 const showFeatureModal = ref(false);
+const showImportModal = ref(false);
+const showBatchResultModal = ref(false);
+const batchTesting = ref(false);
+const batchResult = ref<{ summary: { total: number; success: number; error: number }; results: Array<{ id: number; name: string; status: 'success' | 'error'; message?: string }> } | null>(null);
 const submitting = ref(false);
+const importing = ref(false);
+const skipVerify = ref(false);
+const importFileList = ref<UploadFileInfo[]>([]);
+const importResult = ref<{ summary: { total: number; success: number; skipped: number; error: number }; results: Array<{ email: string; name: string; status: 'success' | 'skipped' | 'error'; message?: string }> } | null>(null);
 const editingAccountId = ref<number | null>(null);
 const editFeatures = ref<string[]>([]);
+const searchInput = ref('');
+
+const importFile = computed<File | null>(() => {
+  const item = importFileList.value[0];
+  return item?.file ?? null;
+});
+
+// 远程分页配置：与 store 状态联动
+const paginationConfig = computed(() => ({
+  page: accountStore.page,
+  pageSize: accountStore.pageSize,
+  itemCount: accountStore.total,
+  showSizePicker: true,
+  pageSizes: [10, 20, 50, 100],
+  prefix: ({ itemCount }: any) => `共 ${itemCount} 条`,
+  onUpdatePage: (p: number) => { accountStore.setPage(p); },
+  onUpdatePageSize: (ps: number) => { accountStore.setPageSize(ps); },
+}));
+
+function handleFilterChange(f: 'all' | 'active' | 'unverified') {
+  accountStore.setFilter(f);
+}
+
+// 搜索防抖
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+function handleSearchInput(val: string) {
+  searchInput.value = val;
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    accountStore.setSearch(val);
+  }, 400);
+}
 
 const featureOptions = [
   { label: 'Workers AI', value: 'ai' },
@@ -151,6 +286,48 @@ async function handleDelete(row: any) {
   await accountStore.deleteAccount(row.id);
   message.success('已删除');
 }
+
+function closeImportModal() {
+  showImportModal.value = false;
+  importFileList.value = [];
+  importResult.value = null;
+  skipVerify.value = false;
+}
+
+async function handleImport() {
+  if (!importFile.value) {
+    message.warning('请选择 CSV 文件');
+    return;
+  }
+  importing.value = true;
+  importResult.value = null;
+  try {
+    const result = await accountStore.importCsv(importFile.value, skipVerify.value);
+    importResult.value = result;
+    const s = result.summary;
+    message.success(`导入完成：成功 ${s.success}，跳过 ${s.skipped}，失败 ${s.error}${skipVerify.value ? '（已跳过验证，请逐个测试激活）' : ''}`);
+  } finally {
+    importing.value = false;
+  }
+}
+
+const importResultColumns: DataTableColumns<any> = [
+  { title: '邮箱', key: 'email', width: 220, ellipsis: { tooltip: true } },
+  { title: '账户名', key: 'name', width: 140 },
+  {
+    title: '结果', key: 'status', width: 90,
+    render: (row) => {
+      const map: Record<string, { type: any; text: string }> = {
+        success: { type: 'success', text: '成功' },
+        skipped: { type: 'warning', text: '跳过' },
+        error: { type: 'error', text: '失败' },
+      };
+      const m = map[row.status] || { type: 'default', text: row.status };
+      return h(NTag, { size: 'small', type: m.type, bordered: false }, { default: () => m.text });
+    },
+  },
+  { title: '说明', key: 'message', ellipsis: { tooltip: true }, render: (row) => row.message || '-' },
+];
 
 function parseFeatures(raw: string | undefined): string[] {
   return (raw || 'ai,workers,browser_render,dns,storage').split(',').filter(Boolean);

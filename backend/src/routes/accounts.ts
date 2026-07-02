@@ -1,6 +1,8 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import multer from 'multer';
 import Cloudflare from 'cloudflare';
-import { getAllAccounts, createAccount, deleteAccount, getAccountById, updateAccountStatus, updateAccountId, updateAccountFeatures, AccountInput } from '../models/account';
+import { getAllAccounts, createAccount, deleteAccount, getAccountById, getAccountByEmail, nameFromEmail, updateAccountStatus, updateAccountId, updateAccountFeatures, AccountInput } from '../models/account';
+import { listAccountsPaged, AccountListFilter } from '../models/account';
 import { encrypt } from '../services/encryptionService';
 import { getCfClient } from '../services/cfFactory';
 import { getQuotaSummary } from '../services/quotaTracker';
@@ -12,21 +14,44 @@ import { getHttpAgent } from '../services/proxyService';
 
 const router = Router();
 
+const uploadCsv = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
 function isDemoAccount(id: number): boolean {
   if (!config.demoAccountIds) return false;
   return config.demoAccountIds.split(',').map(s => parseInt(s.trim(), 10)).includes(id);
 }
 
-router.get('/', (_req: Request, res: Response, next: NextFunction) => {
+router.get('/', (req: Request, res: Response, next: NextFunction) => {
   try {
-    const accounts = getAllAccounts().map(a => ({
-      ...a,
-      api_token: a.api_token ? '***encrypted***' : null,
-      api_key: a.api_key ? '***encrypted***' : null,
-      is_demo: isDemoAccount(a.id),
-    }));
+    // 分页模式：当传入 page 或 pageSize 时启用；不传则保持原全量行为（向后兼容）
+    const wantsPaged = req.query.page !== undefined || req.query.pageSize !== undefined;
     const quota = getQuotaSummary();
-    res.json({ accounts, quota });
+    if (wantsPaged) {
+      const filter = (req.query.filter as string) as AccountListFilter;
+      const validFilters: AccountListFilter[] = ['all', 'active', 'unverified'];
+      const safeFilter: AccountListFilter = validFilters.includes(filter) ? filter : 'all';
+      const paged = listAccountsPaged({
+        page: parseInt(req.query.page as string, 10) || 1,
+        pageSize: parseInt(req.query.pageSize as string, 10) || 20,
+        filter: safeFilter,
+        search: (req.query.search as string) || '',
+      });
+      const accounts = paged.accounts.map(a => ({
+        ...a,
+        api_token: a.api_token ? '***encrypted***' : null,
+        api_key: a.api_key ? '***encrypted***' : null,
+        is_demo: isDemoAccount(a.id),
+      }));
+      res.json({ accounts, quota, total: paged.total, counts: paged.counts });
+    } else {
+      const accounts = getAllAccounts().map(a => ({
+        ...a,
+        api_token: a.api_token ? '***encrypted***' : null,
+        api_key: a.api_key ? '***encrypted***' : null,
+        is_demo: isDemoAccount(a.id),
+      }));
+      res.json({ accounts, quota });
+    }
   } catch (err) { next(err); }
 });
 
@@ -167,5 +192,278 @@ router.post('/:id/test', async (req: Request, res: Response, next: NextFunction)
     res.json({ success: true, user });
   } catch (err) { next(err); }
 });
+
+// ============ 批量测试 ============
+// body: { ids?: number[], onlyUnverified?: boolean }
+// 不传 ids 且 onlyUnverified=true 时，测试所有 is_active=0 的账户
+router.post('/test-batch', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const onlyUnverified = req.body?.onlyUnverified === true || req.body?.onlyUnverified === 'true';
+    const ids: number[] | undefined = Array.isArray(req.body?.ids)
+      ? req.body.ids.map((x: any) => parseInt(x, 10)).filter((n: number) => !isNaN(n))
+      : undefined;
+
+    let targets = getAllAccounts();
+    if (ids && ids.length > 0) {
+      const idSet = new Set(ids);
+      targets = targets.filter(a => idSet.has(a.id));
+    } else if (onlyUnverified) {
+      targets = targets.filter(a => a.is_active === 0);
+    }
+    // 跳过演示账户
+    targets = targets.filter(a => !isDemoAccount(a.id));
+
+    const results: Array<{ id: number; name: string; status: 'success' | 'error'; message?: string }> = [];
+
+    async function testOne(account: { id: number; name: string }): Promise<void> {
+      try {
+        const cf = getCfClient(getAccountById(account.id)!);
+        await cf.user.get();
+        // 自动获取 account_id
+        const saved = getAccountById(account.id);
+        if (saved && !saved.account_id) {
+          try {
+            const accts: any[] = [];
+            for await (const acct of cf.accounts.list()) {
+              accts.push(acct as any);
+            }
+            if (accts.length > 0) {
+              updateAccountId(account.id, accts[0].id);
+            }
+          } catch (e) {
+            appLogger.warn(`[Account:TestBatch] Failed to fetch account_id for "${account.name}": ${e}`);
+          }
+        }
+        updateAccountStatus(account.id, true);
+        createAuditLog(account.id, 'test_account', account.name, 'batch', 'success');
+        results.push({ id: account.id, name: account.name, status: 'success' });
+      } catch (e: any) {
+        // 测试失败：标记为未活跃
+        updateAccountStatus(account.id, false);
+        createAuditLog(account.id, 'test_account', account.name, `batch: ${e.message || e}`, 'error');
+        results.push({ id: account.id, name: account.name, status: 'error', message: e.message || String(e) });
+      }
+    }
+
+    // 并发批处理：每批 5 条并发
+    const BATCH_CONCURRENCY = 5;
+    for (let i = 0; i < targets.length; i += BATCH_CONCURRENCY) {
+      const batch = targets.slice(i, i + BATCH_CONCURRENCY);
+      await Promise.all(batch.map(t => testOne(t)));
+    }
+
+    clearCache();
+    const summary = {
+      total: results.length,
+      success: results.filter(r => r.status === 'success').length,
+      error: results.filter(r => r.status === 'error').length,
+    };
+    appLogger.info(`[Account:TestBatch] 批量测试完成: 共 ${summary.total}，成功 ${summary.success}，失败 ${summary.error}`);
+    res.json({ summary, results });
+  } catch (err) { next(err); }
+});
+
+// ============ 批量导入 CSV ============
+// CSV 表头: email,password,apiKey
+// 按邮箱去重；账户名按规则从邮箱提取；单个账户错误不影响批量导入
+router.post('/import-csv', uploadCsv.single('file'), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: '未提供 CSV 文件' } });
+      return;
+    }
+    const raw = req.file.buffer.toString('utf8').replace(/^\uFEFF/, ''); // 去除 BOM
+    const rows = parseCsv(raw);
+    if (rows.length === 0) {
+      res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'CSV 文件为空或无有效数据行' } });
+      return;
+    }
+
+    const header = rows[0].map(h => h.trim().toLowerCase());
+    const emailIdx = header.findIndex(h => h === 'email');
+    const apiKeyIdx = header.findIndex(h => h === 'apikey' || h === 'api_key');
+
+    if (emailIdx === -1 || apiKeyIdx === -1) {
+      res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'CSV 必须包含 email 和 apiKey 列' } });
+      return;
+    }
+
+    // skipVerify=1 跳过凭证验证（秒级完成），适合大批量导入 + 后续手动测试
+    const skipVerify = req.body?.skipVerify === '1' || req.body?.skipVerify === 'true' || (req.query.skipVerify as string) === '1';
+
+    const dataRows = rows.slice(1);
+    const results: Array<{ email: string; name: string; status: 'success' | 'skipped' | 'error'; message?: string }> = [];
+    const seenEmails = new Set<string>(); // 同批次内去重
+
+    // 预过滤：解析 + 去重 + 数据库去重，生成待处理任务列表
+    interface ImportTask {
+      email: string;
+      apiKey: string;
+      name: string;
+      result: { email: string; name: string; status: 'success' | 'skipped' | 'error'; message?: string };
+    }
+    const pendingTasks: ImportTask[] = [];
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      const email = (row[emailIdx] || '').trim();
+      const apiKey = (row[apiKeyIdx] || '').trim();
+
+      if (!email || !apiKey) {
+        results.push({ email: email || '(空)', name: '', status: 'error', message: '邮箱或 apiKey 为空' });
+        continue;
+      }
+      // 同批次内去重
+      if (seenEmails.has(email)) {
+        results.push({ email, name: nameFromEmail(email), status: 'skipped', message: 'CSV 内重复邮箱' });
+        continue;
+      }
+      seenEmails.add(email);
+      // 数据库去重
+      if (getAccountByEmail(email)) {
+        results.push({ email, name: nameFromEmail(email), status: 'skipped', message: '数据库已存在该邮箱' });
+        continue;
+      }
+      pendingTasks.push({
+        email, apiKey, name: nameFromEmail(email),
+        result: { email, name: nameFromEmail(email), status: 'success' },
+      });
+    }
+
+    // 处理单个任务：验证凭证 + 入库 + 自动获取 account_id
+    async function processTask(task: ImportTask): Promise<void> {
+      const { email, apiKey, name } = task;
+      try {
+        // 验证 Cloudflare 凭证（可跳过）
+        if (!skipVerify) {
+          try {
+            const httpAgent = getHttpAgent();
+            const opts: Record<string, any> = {};
+            if (httpAgent) opts.httpAgent = httpAgent;
+            const tempCf = new Cloudflare({ apiEmail: email, apiKey, ...opts });
+            await tempCf.user.get();
+          } catch (e: any) {
+            task.result = { email, name, status: 'error', message: `凭证验证失败: ${e.message || e}` };
+            return;
+          }
+        }
+        // 保存到数据库
+        const input: AccountInput = {
+          name,
+          auth_type: 'global_key',
+          email,
+          api_key: encrypt(apiKey),
+        };
+        const id = createAccount(input);
+
+        // 自动获取 account_id（跳过验证模式下也尝试获取，失败不阻断）
+        if (!skipVerify) {
+          try {
+            const saved = getAccountById(id);
+            if (saved) {
+              const cf = getCfClient(saved);
+              const accts: any[] = [];
+              for await (const acct of cf.accounts.list()) {
+                accts.push(acct as any);
+              }
+              if (accts.length > 0) {
+                updateAccountId(id, accts[0].id);
+                appLogger.info(`[Account:Import] Auto-fetched account_id=${accts[0].id} for "${name}"`);
+              }
+              updateAccountStatus(id, true);
+            }
+          } catch (e) {
+            appLogger.warn(`[Account:Import] Failed to auto-fetch account_id for "${name}": ${e}`);
+          }
+        } else {
+          // 跳过验证模式：标记为未验证，后续通过「测试」按钮激活
+          updateAccountStatus(id, false);
+        }
+
+        createAuditLog(id, 'import_account', name, `email=${email}${skipVerify ? ' (skipVerify)' : ''}`, 'success');
+        task.result = { email, name, status: 'success' };
+      } catch (e: any) {
+        task.result = { email, name, status: 'error', message: `保存失败: ${e.message || e}` };
+      }
+    }
+
+    // 并发批处理：每批 5 条并发，批与批之间顺序执行
+    const BATCH_CONCURRENCY = skipVerify ? 20 : 5; // 跳过验证时无需控制 CF API 并发，可大幅提高
+    for (let i = 0; i < pendingTasks.length; i += BATCH_CONCURRENCY) {
+      const batch = pendingTasks.slice(i, i + BATCH_CONCURRENCY);
+      await Promise.all(batch.map(t => processTask(t)));
+      batch.forEach(t => results.push(t.result));
+    }
+
+    clearCache();
+    const summary = {
+      total: results.length,
+      success: results.filter(r => r.status === 'success').length,
+      skipped: results.filter(r => r.status === 'skipped').length,
+      error: results.filter(r => r.status === 'error').length,
+    };
+    appLogger.info(`[Account:Import] CSV 批量导入完成${skipVerify ? ' (skipVerify)' : ''}: 共 ${summary.total}，成功 ${summary.success}，跳过 ${summary.skipped}，失败 ${summary.error}`);
+    res.json({ summary, results });
+  } catch (err) { next(err); }
+});
+
+/**
+* 简单 CSV 解析器：支持双引号包裹的字段和字段内的逗号/换行/双引号转义
+ */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  let i = 0;
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  while (i < normalized.length) {
+    const ch = normalized[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (normalized[i + 1] === '"') {
+          field += '"';
+          i += 2;
+          continue;
+        }
+        inQuotes = false;
+        i++;
+        continue;
+      }
+      field += ch;
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      i++;
+      continue;
+    }
+    if (ch === ',') {
+      row.push(field);
+      field = '';
+      i++;
+      continue;
+    }
+    if (ch === '\n') {
+      row.push(field);
+      field = '';
+      if (row.length > 1 || (row.length === 1 && row[0] !== '')) {
+        rows.push(row);
+      }
+      row = [];
+      i++;
+      continue;
+    }
+    field += ch;
+    i++;
+  }
+  if (field !== '' || row.length > 0) {
+    row.push(field);
+    if (row.length > 1 || (row.length === 1 && row[0] !== '')) {
+      rows.push(row);
+    }
+  }
+  return rows;
+}
 
 export default router;
