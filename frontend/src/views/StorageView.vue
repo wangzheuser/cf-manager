@@ -2,9 +2,9 @@
   <div>
     <n-h2>存储管理</n-h2>
     <n-space align="center" style="margin-bottom: 16px">
-      <span>账号：</span>
-      <n-select v-model:value="selectedAccount" :options="accountOptions" style="width: 200px; max-width: 60vw" size="small" @update:value="onAccountChange" />
-    </n-space>
+     <span>账号：</span>
+      <n-select v-model:value="selectedAccount" :options="accountOptions" filterable placeholder="搜索账号" style="width: 200px; max-width: 60vw" size="small" @update:value="onAccountChange" />
+   </n-space>
 
     <n-tabs v-model:value="activeTab" type="line">
       <!-- ============ KV Tab ============ -->
@@ -274,10 +274,9 @@ import { ref, computed, h, onMounted, watch } from 'vue';
 import { NButton, NSpace, NInput, NSelect, NCheckbox, useMessage, useDialog } from 'naive-ui';
 import type { DataTableColumns } from 'naive-ui';
 import { storageApi } from '../api/storage';
-import { useAccountStore } from '../stores/accountStore';
+import { accountsApi } from '../api/accounts';
 import { formatCN } from '../utils/dateFormat';
 
-const accountStore = useAccountStore();
 const message = useMessage();
 const dialog = useDialog();
 
@@ -298,8 +297,9 @@ function confirmAction(title: string, content: string): Promise<boolean> {
 const selectedAccount = ref<number | null>(null);
 const activeTab = ref('kv');
 const r2Available = ref(true);
+const allAccounts = ref<any[]>([]);
 const accountOptions = computed(() =>
-  accountStore.accounts
+  allAccounts.value
     .filter((a: any) => a.is_active && (a.enabled_features || 'ai,workers,browser_render,dns,storage').includes('storage'))
     .map((a: any) => ({ label: a.name, value: a.id }))
 );
@@ -912,7 +912,12 @@ watch(activeTab, (tab) => {
 });
 
 onMounted(async () => {
-  await accountStore.fetchAccounts();
+  try {
+    const { data } = await accountsApi.getAll();
+    allAccounts.value = data.accounts || [];
+  } catch {
+    allAccounts.value = [];
+  }
   if (accountOptions.value.length > 0) {
     selectedAccount.value = accountOptions.value[0].value;
     await checkR2Available();
