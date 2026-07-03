@@ -1186,16 +1186,10 @@ function handleEditPagesEnv(row: any) {
 
 async function handleDeletePagesEnv(row: any) {
   try {
-    const existingProd = pagesProject.value?.deployment_configs?.production || {};
-    const existingPreview = pagesProject.value?.deployment_configs?.preview || {};
-    const prodEnvVars = { ...(existingProd.env_vars || {}) };
-    const previewEnvVars = { ...(existingPreview.env_vars || {}) };
-    delete prodEnvVars[row.name];
-    delete previewEnvVars[row.name];
     await workersApi.editPagesProject(settingsAccountId.value, settingsWorkerName.value, {
       deployment_configs: {
-        production: { ...existingProd, env_vars: prodEnvVars },
-        preview: { ...existingPreview, env_vars: previewEnvVars },
+        production: { env_vars: { [row.name]: null } },
+        preview: { env_vars: { [row.name]: null } },
       },
     });
     message.success('环境变量已删除');

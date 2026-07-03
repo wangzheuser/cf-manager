@@ -162,6 +162,7 @@ chmod +x deploy.sh
 | `PROXY_URL` | 否 | HTTP/SOCKS5 代理地址，如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080` |
 | `APP_PORT` | 否 | 对外暴露端口，默认 `3000` |
 | `BASE_URL` | 否 | 前端访问路径，如 `/admin/`，默认 `/`（仅 Docker 部署需要，Worker 版固定为 `/admin/`） |
+| `DEMO_ACCOUNT_IDS` | 否 | 演示模式保护的账户 ID（逗号分隔），如 `1,2,3`。受保护账户不可删除和修改 |
 
 <details>
 <summary><strong>本地开发</strong></summary>

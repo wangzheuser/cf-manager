@@ -31,6 +31,11 @@ on:
         required: false
         default: 'cfmgrbest'
         type: string
+      demo_account_ids:
+        description: '演示模式保护的账户 ID（逗号分隔，如 1,2,3，留空则不启用）'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -94,17 +99,19 @@ jobs:
         run: |
           wrangler pages project create "${{ github.event.inputs.project_name }}" --production-branch main 2>/dev/null || echo "Project already exists, skipping creation"
 
-      - name: Deploy to Cloudflare Pages
-        working-directory: worker
-        run: wrangler pages deploy public/ --project-name "${{ github.event.inputs.project_name }}" --branch main --commit-dirty=true
-
       - name: Configure secrets
-        working-directory: worker
         run: |
           echo "${{ github.event.inputs.encryption_key }}" | wrangler pages secret put ENCRYPTION_KEY --project-name "${{ github.event.inputs.project_name }}"
           if [ -n "${{ github.event.inputs.api_secret }}" ]; then
             echo "${{ github.event.inputs.api_secret }}" | wrangler pages secret put API_SECRET --project-name "${{ github.event.inputs.project_name }}"
           fi
+          if [ -n "${{ github.event.inputs.demo_account_ids }}" ]; then
+            echo "${{ github.event.inputs.demo_account_ids }}" | wrangler pages secret put DEMO_ACCOUNT_IDS --project-name "${{ github.event.inputs.project_name }}"
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        working-directory: worker
+        run: wrangler pages deploy public/ --project-name "${{ github.event.inputs.project_name }}" --branch main --commit-dirty=true
 
       - name: Deployment summary
         run: |
@@ -119,4 +126,5 @@ jobs:
           echo "| Database ID | ${{ steps.d1.outputs.database_id }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ENCRYPTION_KEY | ${{ github.event.inputs.encryption_key }} |" >> $GITHUB_STEP_SUMMARY
           echo "| API_SECRET | ${{ github.event.inputs.api_secret }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| DEMO_ACCOUNT_IDS | ${{ github.event.inputs.demo_account_ids }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 访问地址 | https://${{ github.event.inputs.project_name }}.pages.dev/admin/ |" >> $GITHUB_STEP_SUMMARY

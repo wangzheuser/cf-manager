@@ -15,6 +15,10 @@
               {{ settings.api_secret_configured ? '已配置' : '未配置' }}
             </n-tag>
           </n-descriptions-item>
+          <n-descriptions-item label="Demo 保护账户">
+            <n-text v-if="settings.demo_account_ids">{{ settings.demo_account_ids }}</n-text>
+            <n-tag v-else size="small" type="default">未配置</n-tag>
+          </n-descriptions-item>
           <n-descriptions-item label="数据库路径">
             <n-text>{{ settings.db_path || '-' }}</n-text>
           </n-descriptions-item>

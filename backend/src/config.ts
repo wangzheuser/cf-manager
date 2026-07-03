@@ -6,4 +6,5 @@ export const config = {
   apiSecret: process.env.API_SECRET || '',
   dbPath: process.env.DB_PATH || path.join(__dirname, '..', 'data', 'cf-manager.db'),
   proxyUrl: process.env.PROXY_URL || '',
+  demoAccountIds: process.env.DEMO_ACCOUNT_IDS || '',
 };

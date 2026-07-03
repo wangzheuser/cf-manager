@@ -156,10 +156,13 @@ async function handlePagesDeploy(req: Request, res: Response, next: NextFunction
             }
           }
         }
+        appLogger.info(`[Pages Deploy Route] ZIP prefix detected: "${prefix}", total entries: ${entries.length}`);
         for (const entry of entries) {
           if (!entry.isDirectory) {
             const p = entry.entryName.replace(/\\/g, '/');
-            files.push({ path: prefix ? p.slice(prefix.length) : p, buffer: entry.getData() });
+            const finalPath = prefix ? p.slice(prefix.length) : p;
+            appLogger.info(`[Pages Deploy Route] ZIP entry: "${p}" -> final path: "${finalPath}"`);
+            files.push({ path: finalPath, buffer: entry.getData() });
           }
         }
       } else {

@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import Cloudflare from 'cloudflare';
 import { getAllAccounts, createAccount, deleteAccount, getAccountById, updateAccountStatus, updateAccountId, updateAccountFeatures, AccountInput } from '../models/account';
 import { encrypt } from '../services/encryptionService';
 import { getCfClient } from '../services/cfFactory';
@@ -6,8 +7,15 @@ import { getQuotaSummary } from '../services/quotaTracker';
 import { clearCache } from '../services/accountRouter';
 import { appLogger } from '../services/logger';
 import { createAuditLog } from '../models/auditLog';
+import { config } from '../config';
+import { getHttpAgent } from '../services/proxyService';
 
 const router = Router();
+
+function isDemoAccount(id: number): boolean {
+  if (!config.demoAccountIds) return false;
+  return config.demoAccountIds.split(',').map(s => parseInt(s.trim(), 10)).includes(id);
+}
 
 router.get('/', (_req: Request, res: Response, next: NextFunction) => {
   try {
@@ -15,6 +23,7 @@ router.get('/', (_req: Request, res: Response, next: NextFunction) => {
       ...a,
       api_token: a.api_token ? '***encrypted***' : null,
       api_key: a.api_key ? '***encrypted***' : null,
+      is_demo: isDemoAccount(a.id),
     }));
     const quota = getQuotaSummary();
     res.json({ accounts, quota });
@@ -41,6 +50,24 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
       return;
     }
 
+    // Verify credentials before saving
+    try {
+      const httpAgent = getHttpAgent();
+      const opts: Record<string, any> = {};
+      if (httpAgent) opts.httpAgent = httpAgent;
+
+      let tempCf: Cloudflare;
+      if (auth_type === 'token') {
+        tempCf = new Cloudflare({ apiToken: api_token, ...opts });
+      } else {
+        tempCf = new Cloudflare({ apiEmail: email, apiKey: api_key, ...opts });
+      }
+      await tempCf.user.get();
+    } catch (e: any) {
+      res.status(400).json({ error: { code: 'CREDENTIAL_INVALID', message: `Cloudflare API 凭证验证失败: ${e.message || e}` } });
+      return;
+    }
+
     const input: AccountInput = { name, auth_type, account_id, enabled_features: req.body.enabled_features };
     if (auth_type === 'token') {
       input.api_token = encrypt(api_token);
@@ -50,13 +77,11 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
     }
     const id = createAccount(input);
 
-    // 创建后自动获取并存储 Cloudflare Account ID
     if (!account_id) {
       try {
         const saved = getAccountById(id);
         if (saved) {
           const cf = getCfClient(saved);
-          await cf.user.get(); // 验证凭证有效性
           const accts: any[] = [];
           for await (const acct of cf.accounts.list()) {
             accts.push(acct as any);
@@ -80,6 +105,10 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
 router.patch('/:id/features', (req: Request, res: Response, next: NextFunction) => {
   try {
     const id = parseInt(req.params.id as string, 10);
+    if (isDemoAccount(id)) {
+      res.status(403).json({ error: { code: 'DEMO_PROTECTED', message: '演示账户不可修改' } });
+      return;
+    }
     const account = getAccountById(id);
     if (!account) { res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Account not found' } }); return; }
     const { enabled_features } = req.body;
@@ -97,6 +126,10 @@ router.patch('/:id/features', (req: Request, res: Response, next: NextFunction) 
 router.delete('/:id', (req: Request, res: Response, next: NextFunction) => {
   try {
     const id = parseInt(req.params.id as string, 10);
+    if (isDemoAccount(id)) {
+      res.status(403).json({ error: { code: 'DEMO_PROTECTED', message: '演示账户不可删除' } });
+      return;
+    }
     const account = getAccountById(id);
     if (!account) { res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Account not found' } }); return; }
     createAuditLog(id, 'delete_account', account.name, null, 'success');

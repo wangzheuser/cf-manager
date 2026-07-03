@@ -7,12 +7,19 @@ import { getQuotaSummary } from '../services/quotaTracker';
 
 const app = new Hono<{ Bindings: Env }>();
 
+function isDemoAccount(id: number, demoIds: string | undefined): boolean {
+  if (!demoIds) return false;
+  return demoIds.split(',').map(s => parseInt(s.trim(), 10)).includes(id);
+}
+
 app.get('/', async (c) => {
   const db = c.env.DB;
+  const demoIds = c.env.DEMO_ACCOUNT_IDS;
   const accounts = (await getAllAccounts(db)).map(a => ({
     ...a,
     api_token: a.api_token ? '***encrypted***' : null,
     api_key: a.api_key ? '***encrypted***' : null,
+    is_demo: isDemoAccount(a.id, demoIds),
   }));
   const quota = await getQuotaSummary(db, c.env.ENCRYPTION_KEY);
   return c.json({ accounts, quota });
@@ -27,6 +34,24 @@ app.post('/', async (c) => {
   if (auth_type !== 'token' && auth_type !== 'global_key') return c.json({ error: { code: 'VALIDATION_ERROR', message: 'auth_type must be "token" or "global_key"' } }, 400);
   if (auth_type === 'token' && !api_token) return c.json({ error: { code: 'VALIDATION_ERROR', message: 'api_token is required for token auth' } }, 400);
   if (auth_type === 'global_key' && (!api_key || !email)) return c.json({ error: { code: 'VALIDATION_ERROR', message: 'api_key and email are required for global_key auth' } }, 400);
+
+  // Verify credentials before saving
+  try {
+    const CF_BASE = 'https://api.cloudflare.com/client/v4';
+    let headers: Record<string, string>;
+    if (auth_type === 'token') {
+      headers = { Authorization: `Bearer ${api_token}` };
+    } else {
+      headers = { 'X-Auth-Email': email, 'X-Auth-Key': api_key };
+    }
+    const verifyRes = await fetch(`${CF_BASE}/user`, { headers });
+    if (!verifyRes.ok) {
+      const body = await verifyRes.text();
+      return c.json({ error: { code: 'CREDENTIAL_INVALID', message: `Cloudflare API 凭证验证失败 (${verifyRes.status}): ${body}` } }, 400);
+    }
+  } catch (e) {
+    return c.json({ error: { code: 'CREDENTIAL_INVALID', message: `无法连接 Cloudflare API: ${e}` } }, 400);
+  }
 
   const input: any = { name, auth_type, account_id, enabled_features };
   if (auth_type === 'token') {
@@ -61,6 +86,9 @@ app.post('/', async (c) => {
 app.patch('/:id/features', async (c) => {
   const db = c.env.DB;
   const id = parseInt(c.req.param('id'), 10);
+  if (isDemoAccount(id, c.env.DEMO_ACCOUNT_IDS)) {
+    return c.json({ error: { code: 'DEMO_PROTECTED', message: '演示账户不可修改' } }, 403);
+  }
   const account = await getAccountById(db, id);
   if (!account) return c.json({ error: { code: 'NOT_FOUND', message: 'Account not found' } }, 404);
 
@@ -75,6 +103,9 @@ app.patch('/:id/features', async (c) => {
 app.delete('/:id', async (c) => {
   const db = c.env.DB;
   const id = parseInt(c.req.param('id'), 10);
+  if (isDemoAccount(id, c.env.DEMO_ACCOUNT_IDS)) {
+    return c.json({ error: { code: 'DEMO_PROTECTED', message: '演示账户不可删除' } }, 403);
+  }
   const account = await getAccountById(db, id);
   if (!account) return c.json({ error: { code: 'NOT_FOUND', message: 'Account not found' } }, 404);
 

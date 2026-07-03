@@ -172,14 +172,19 @@ const columns: DataTableColumns<any> = [
       });
     },
   },
-  { title: '状态', key: 'is_active', width: 80, render: (row) => h(NTag, { size: 'small', type: row.is_active ? 'success' : 'default' }, { default: () => row.is_active ? '活跃' : '未验证' }) },
+  { title: '状态', key: 'is_active', width: 80, render: (row) => {
+    if (row.is_demo) {
+      return h(NTag, { size: 'small', type: 'warning', bordered: false }, { default: () => '演示' });
+    }
+    return h(NTag, { size: 'small', type: row.is_active ? 'success' : 'default' }, { default: () => row.is_active ? '活跃' : '未验证' });
+  }},
   {
     title: '操作', key: 'actions', width: 220,
     render: (row) => h(NSpace, { size: 4 }, {
       default: () => [
-        h(NButton, { size: 'small', onClick: () => openFeatureEditor(row) }, { default: () => '功能' }),
+        h(NButton, { size: 'small', disabled: row.is_demo, onClick: () => openFeatureEditor(row) }, { default: () => '功能' }),
         h(NButton, { size: 'small', onClick: () => handleTest(row) }, { default: () => '测试' }),
-        h(NButton, { size: 'small', type: 'error', onClick: () => handleDelete(row) }, { default: () => '删除' }),
+        h(NButton, { size: 'small', type: 'error', disabled: row.is_demo, onClick: () => handleDelete(row) }, { default: () => '删除' }),
       ],
     }),
   },

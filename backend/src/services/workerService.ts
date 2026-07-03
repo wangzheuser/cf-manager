@@ -52,7 +52,7 @@ export async function deployWorker(account: Account, name: string, scriptContent
   const cf = getCfClient(account);
   const result = await cf.workers.scripts.update(name, {
     account_id: accountId!,
-    metadata: { main_module: 'worker.js' } as any,
+    metadata: { main_module: 'worker.js', compatibility_date: '2024-01-01' } as any,
     'worker.js': new Blob([scriptContent], { type: 'application/javascript+module' })
   } as any);
   return result as any;
@@ -510,7 +510,17 @@ export async function deployPages(
     return projectInfo;
   }
 
-  // 3. Build manifest + deployment params
+  // 3. Build manifest + deployment params, separating special files
+  // SDK uses camelCase param names, NOT the raw filenames
+  const SPECIAL_FILE_TO_PARAM: Record<string, string> = {
+    '_worker.js': '_workerJS',
+    '_worker.bundle': '_workerBundle',
+    '_headers': '_headers',
+    '_redirects': '_redirects',
+    '_routes.json': '_routesJson',
+    'functions-filepath-routing-config.json': 'functionsFilepathRoutingConfigJson',
+  };
+
   for (const f of files) {
     f.path = f.path.replace(/\\/g, '/').replace(/^\/+/, '');
   }
@@ -526,12 +536,21 @@ export async function deployPages(
   };
 
   for (const f of files) {
-    manifest[f.path] = crypto.createHash('sha256').update(f.buffer).digest('hex');
-    params[f.path] = new File([new Uint8Array(f.buffer)], f.path, { type: 'application/octet-stream' });
+    const basename = f.path.split('/').pop() || f.path;
+    const paramName = (!f.path.includes('/')) ? SPECIAL_FILE_TO_PARAM[basename] : undefined;
+    appLogger.info(`[Pages Deploy] File: "${f.path}" | basename: "${basename}" | paramName: ${paramName || '(none, normal file)'} | size: ${f.buffer.length} bytes`);
+    if (paramName) {
+      params[paramName] = new File([new Uint8Array(f.buffer)], basename, { type: 'application/octet-stream' });
+    } else {
+      manifest[f.path] = crypto.createHash('sha256').update(f.buffer).digest('hex');
+      params[f.path] = new File([new Uint8Array(f.buffer)], f.path, { type: 'application/octet-stream' });
+    }
   }
   params.manifest = JSON.stringify(manifest);
 
-  appLogger.info(`[Pages Deploy] ${files.length} files, manifest: ${Object.keys(manifest).slice(0, 5).join(', ')} ...`);
+  appLogger.info(`[Pages Deploy] Total: ${files.length} files | Normal: ${Object.keys(manifest).length} | Special: ${files.length - Object.keys(manifest).length}`);
+  appLogger.info(`[Pages Deploy] Manifest keys: ${JSON.stringify(Object.keys(manifest))}`);
+  appLogger.info(`[Pages Deploy] Special param keys: ${Object.keys(SPECIAL_FILE_TO_PARAM).filter(fn => params[SPECIAL_FILE_TO_PARAM[fn]]).map(fn => `${fn} -> ${SPECIAL_FILE_TO_PARAM[fn]}`).join(', ')}`);
 
   // 4. Deploy via SDK (handles multipart form construction)
   return cf.pages.projects.deployments.create(projectName, params as any);
