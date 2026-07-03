@@ -11,7 +11,7 @@ import { logger } from '../services/logger';
 /** Upstream status codes that should trigger account rotation. */
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 
-const MAX_RETRY_PER_ACCOUNT = 3;
+const MAX_RETRY_PER_ACCOUNT = 1; // 每个账户最多重试 1 次，失败立即换账户
 
 function isNeuronLimitError(text: string): boolean {
   return text.includes('4006') || text.includes('daily free allocation') || text.includes('neuron limit');
@@ -250,6 +250,7 @@ app.post('/chat/completions', async (c) => {
       const count = (retryCount.get(account.id) || 0) + 1;
       retryCount.set(account.id, count);
       if (count >= MAX_RETRY_PER_ACCOUNT) skipped.add(account.id);
+      await new Promise(r => setTimeout(r, 1000));
       continue;
     }
 
@@ -267,6 +268,7 @@ app.post('/chat/completions', async (c) => {
           logger.warn('openai', `[${rid}] Account ${account.name} upstream ${cfResp.status}, rotating`);
           try { await addAuditLog(c.env.DB, { account_id: account.id, action: 'ai_chat_completion', target: body.model, detail: `[${rid}] upstream ${cfResp.status}, switching`, status: 'error' }); } catch {}
         }
+        await new Promise(r => setTimeout(r, 1000));
         continue;
       }
 

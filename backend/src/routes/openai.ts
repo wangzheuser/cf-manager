@@ -15,7 +15,7 @@ import { estimateNeurons } from '../services/pricing';
 const router = Router();
 
 /** Maximum retries per account before skipping it permanently in this request. */
-const MAX_RETRY_PER_ACCOUNT = 3;
+const MAX_RETRY_PER_ACCOUNT = 1; // 每个账户最多重试 1 次，失败立即换账户
 
 /** Upstream status codes that should trigger account rotation instead of immediate error. */
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
@@ -161,6 +161,7 @@ router.post('/chat/completions', async (req: Request, res: Response, next: NextF
           skipped.add(account.id);
           appLogger.warn(`[AI][${rid}] Account ${account.name} exceeded max retries, skipping`);
         }
+        await new Promise(r => setTimeout(r, 1000));
         continue;
       }
 
@@ -188,6 +189,7 @@ router.post('/chat/completions', async (req: Request, res: Response, next: NextF
             createAuditLog(account.id, 'ai_chat_completion', req.body.model,
               `[${rid}] upstream ${cfResp.status}, switching`, 'error');
           }
+          await new Promise(r => setTimeout(r, 1000));
           continue;
         }
 

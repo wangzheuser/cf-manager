@@ -9,19 +9,20 @@
     </n-space>
 
     <!-- Workers Usage per Account (compact) -->
-    <n-grid v-if="usageData.length" :cols="6" :x-gap="8" :y-gap="8" responsive="screen" style="margin-bottom: 12px;">
-      <n-gi v-for="u in usageData" :key="u.accountId">
+    <div class="card-grid-scroll">
+      <n-grid v-if="usageData.length" :x-gap="8" :y-gap="8" cols="1 s:2 m:4 l:6 xl:8" responsive="screen" style="margin-bottom: 12px;">
+        <n-gi v-for="u in usageData" :key="u.accountId">
         <n-popover trigger="click" placement="bottom">
           <template #trigger>
             <div class="worker-compact-card">
-              <span class="worker-compact-card__name" :title="u.accountName">{{ u.accountName.length > 8 ? u.accountName.slice(0, 7) + '…' : u.accountName }}</span>
+              <span class="worker-compact-card__name" :title="u.accountName">{{ u.accountName }}</span>
               <n-progress
                 type="line"
                 :percentage="calcUsagePercentage(u)"
                 :height="6"
                 :show-indicator="false"
                 :status="calcUsagePercentage(u) > 90 ? 'error' : calcUsagePercentage(u) > 70 ? 'warning' : 'success'"
-                :style="{ flex: 1 }"
+                :style="{ flex: '1 1 0', minWidth: '24px', overflow: 'hidden' }"
               />
               <span class="worker-compact-card__metric">{{ formatNumber(u.requests) }}</span>
             </div>
@@ -46,14 +47,18 @@
         </n-popover>
       </n-gi>
     </n-grid>
+    </div>
 
-    <n-data-table
-      :columns="columns"
-      :data="workerStore.workers"
-      :loading="workerStore.loading"
-      :bordered="false"
-      :scroll-x="700"
-    />
+    <div class="table-scroll-wrapper">
+      <n-data-table
+        :columns="columns"
+        :data="workerStore.workers"
+        :loading="workerStore.loading"
+        :max-height="600"
+        :bordered="false"
+        :scroll-x="700"
+      />
+    </div>
 
     <!-- 部署 Modal -->
     <n-modal v-model:show="showDeployModal" preset="dialog" title="部署" style="width: 500px; max-width: 95vw">
@@ -1246,7 +1251,7 @@ const columns = computed<DataTableColumns<any>>(() => {
 
 // Secret columns
 const secretColumns: DataTableColumns<any> = [
-  { title: '名称', key: 'name' },
+  { title: '名称', key: 'name', minWidth: 100 },
   { title: '类型', key: 'type', width: 120, render: (row) => h(NTag, { size: 'small' }, { default: () => row.type || 'unknown' }) },
   { title: '操作', key: 'actions', width: 140, render: (row) => h(NSpace, { size: 4 }, {
     default: () => [
@@ -1258,20 +1263,20 @@ const secretColumns: DataTableColumns<any> = [
 
 // Schedule columns
 const scheduleColumns: DataTableColumns<any> = [
-  { title: 'Cron 表达式', key: 'cron' },
-  { title: '修改时间', key: 'modified_on', render: (row) => row.modified_on ? formatCN(row.modified_on) : '-' },
+  { title: 'Cron 表达式', key: 'cron', minWidth: 120 },
+  { title: '修改时间', key: 'modified_on', width: 170, render: (row) => row.modified_on ? formatCN(row.modified_on) : '-' },
 ];
 
 // Domain columns
 const domainColumns: DataTableColumns<any> = [
-  { title: '域名', key: 'hostname' },
+  { title: '域名', key: 'hostname', minWidth: 120, ellipsis: { tooltip: true } },
   { title: '环境', key: 'environment', width: 100, render: (row) => h(NTag, { size: 'small', type: row.environment === 'production' ? 'success' : 'warning' }, { default: () => row.environment || '-' }) },
   { title: '操作', key: 'actions', width: 80, render: (row) => h(NButton, { size: 'tiny', type: 'error', onClick: () => handleDeleteDomain(row) }, { default: () => '删除' }) },
 ];
 
 // Route columns
 const routeColumns: DataTableColumns<any> = [
-  { title: 'Pattern', key: 'pattern' },
+  { title: 'Pattern', key: 'pattern', minWidth: 120, ellipsis: true },
   { title: 'Script', key: 'script', width: 150 },
   { title: 'ID', key: 'id', width: 120, ellipsis: true },
   { title: '操作', key: 'actions', width: 80, render: (row) => h(NButton, { size: 'tiny', type: 'error', onClick: () => handleDeleteRoute(row) }, { default: () => '删除' }) },
@@ -1280,13 +1285,13 @@ const routeColumns: DataTableColumns<any> = [
 // Deployment columns
 const deploymentColumns: DataTableColumns<any> = [
   { title: 'ID', key: 'id', width: 120, ellipsis: true },
-  { title: '创建时间', key: 'created_on', render: (row) => row.created_on ? formatCN(row.created_on) : '-' },
+  { title: '创建时间', key: 'created_on', width: 170, render: (row) => row.created_on ? formatCN(row.created_on) : '-' },
   { title: '来源', key: 'source', width: 100, render: (row) => row.source || '-' },
 ];
 
 // Pages domain columns
 const pagesDomainColumns: DataTableColumns<any> = [
-  { title: '域名', key: 'name' },
+  { title: '域名', key: 'name', minWidth: 120, ellipsis: { tooltip: true } },
   { title: '状态', key: 'status', width: 100, render: (row) => h(NTag, { size: 'small', type: row.status === 'active' ? 'success' : 'warning' }, { default: () => row.status || '-' }) },
   {
     title: '操作', key: 'actions', width: 120,
@@ -1301,9 +1306,9 @@ const pagesDomainColumns: DataTableColumns<any> = [
 
 // Pages env var columns
 const pagesEnvColumns: DataTableColumns<any> = [
-  { title: '名称', key: 'name' },
+  { title: '名称', key: 'name', width: 120 },
   { title: '类型', key: 'type', width: 100, render: (row) => h(NTag, { size: 'small', type: row.type === 'secret_text' ? 'warning' : 'default' }, { default: () => row.type === 'secret_text' ? '加密' : '明文' }) },
-  { title: '值', key: 'value', ellipsis: true },
+  { title: '值', key: 'value', minWidth: 120, ellipsis: true },
   { title: '操作', key: 'actions', width: 140, render: (row) => h(NSpace, { size: 4 }, {
     default: () => [
       h(NButton, { size: 'tiny', onClick: () => handleEditPagesEnv(row) }, { default: () => '编辑' }),
@@ -1315,8 +1320,8 @@ const pagesEnvColumns: DataTableColumns<any> = [
 // Pages bindings columns
 const bindingsColumns: DataTableColumns<any> = [
   { title: '类型', key: 'type', width: 100, render: (row) => h(NTag, { size: 'small', type: row.typeKey === 'kv_namespaces' ? 'info' : row.typeKey === 'd1_databases' ? 'warning' : 'success' }, { default: () => row.type }) },
-  { title: '变量名', key: 'name' },
-  { title: '资源', key: 'value', ellipsis: true, render: (row) => {
+  { title: '变量名', key: 'name', width: 120 },
+  { title: '资源', key: 'value', minWidth: 150, ellipsis: true, render: (row) => {
     const resolved = resolveResourceName(row.value);
     return resolved.name
       ? h(NSpace, { size: 'small', align: 'center' }, { default: () => [h('span', null, resolved.name), h(NTag, { size: 'tiny', type: 'default', style: 'opacity: 0.6' }, { default: () => resolved.id })] })
@@ -1430,7 +1435,8 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 180px;
+  width: 100%;
+  min-width: 0;
   height: 28px;
   padding: 0 8px;
   border: 1px solid #e0e0e6;
@@ -1438,6 +1444,7 @@ onMounted(() => {
   cursor: pointer;
   transition: background-color 0.2s;
   background-color: #fff;
+  box-sizing: border-box;
 }
 .worker-compact-card:hover { background-color: #f5f5f5; }
 .worker-compact-card__name {
@@ -1445,13 +1452,42 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 70px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 .worker-compact-card__metric {
   font-size: 11px;
-  color: #666;
+  color: #333;
+  font-weight: 500;
   flex-shrink: 0;
   white-space: nowrap;
+  min-width: 32px;
+  text-align: right;
+}
+
+.table-scroll-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.card-grid-scroll {
+  max-height: 200px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 768px) {
+  .worker-compact-card {
+    width: 100%;
+    min-width: 100px;
+  }
+  .worker-compact-card__name {
+    min-width: 0;
+  }
+  .worker-compact-card__metric {
+    font-size: 10px;
+  }
 }
 </style>

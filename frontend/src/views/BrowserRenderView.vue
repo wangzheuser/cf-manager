@@ -3,12 +3,13 @@
     <n-h2>浏览器渲染</n-h2>
 
     <!-- 用量统计 (compact) -->
-    <n-grid v-if="usageList.length > 0" :cols="6" :x-gap="8" :y-gap="8" responsive="screen" style="margin-bottom: 16px;">
+    <div class="card-grid-scroll">
+    <n-grid v-if="usageList.length > 0" :x-gap="8" :y-gap="8" cols="1 s:2 m:4 l:6 xl:8" responsive="screen" style="margin-bottom: 16px;">
       <n-gi v-for="u in usageList" :key="u.accountId">
         <n-popover trigger="click" placement="bottom">
           <template #trigger>
             <div class="br-compact-card">
-              <span class="br-compact-card__name" :title="u.accountName">{{ u.accountName.length > 8 ? u.accountName.slice(0, 7) + '…' : u.accountName }}</span>
+              <span class="br-compact-card__name" :title="u.accountName">{{ u.accountName }}</span>
               <n-progress
                 type="line"
                 :percentage="Math.min(u.used / u.limit * 100, 100)"
@@ -16,7 +17,7 @@
                 :rail-color="'#e8e8e8'"
                 :height="6"
                 :show-indicator="false"
-                :style="{ flex: 1 }"
+                :style="{ flex: '1 1 0', minWidth: '24px', overflow: 'hidden' }"
               />
               <span class="br-compact-card__metric" :style="{ color: u.used > 500 ? '#e03050' : '#666' }">{{ formatSeconds(u.used) }}</span>
             </div>
@@ -44,6 +45,7 @@
         </n-popover>
       </n-gi>
     </n-grid>
+    </div>
 
     <n-card size="small" style="margin-bottom: 16px">
       <n-space vertical>
@@ -95,6 +97,7 @@
         </template>
         <iframe
           v-if="htmlViewMode === 'render'"
+          class="br-result-frame"
           :srcdoc="result.html"
           style="width: 100%; height: 600px; border: 1px solid #eee; border-radius: 4px;"
           sandbox="allow-same-origin"
@@ -112,7 +115,7 @@
         <template #header-extra>
           <n-button size="tiny" @click="downloadPdf">下载 PDF</n-button>
         </template>
-        <iframe :src="result.pdf" style="width: 100%; height: 700px; border: 1px solid #eee;" />
+        <iframe :src="result.pdf" class="br-result-pdf" style="width: 100%; border: 1px solid #eee;" />
       </n-card>
 
       <!-- 链接提取结果 -->
@@ -231,7 +234,8 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 180px;
+  width: 100%;
+  min-width: 0;
   height: 28px;
   padding: 0 8px;
   border: 1px solid #e0e0e6;
@@ -239,6 +243,7 @@ onMounted(() => {
   cursor: pointer;
   transition: background-color 0.2s;
   background-color: #fff;
+  box-sizing: border-box;
 }
 .br-compact-card:hover { background-color: #f5f5f5; }
 .br-compact-card__name {
@@ -246,13 +251,50 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 70px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 .br-compact-card__metric {
   font-size: 11px;
-  color: #666;
+  color: #333;
+  font-weight: 500;
   flex-shrink: 0;
   white-space: nowrap;
+  min-width: 32px;
+  text-align: right;
+}
+
+.br-result-frame {
+  height: 600px;
+}
+
+.br-result-pdf {
+  height: 700px;
+}
+
+.card-grid-scroll {
+  max-height: 200px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 768px) {
+  .br-compact-card {
+    width: 100%;
+    min-width: 100px;
+  }
+  .br-compact-card__name {
+    min-width: 0;
+  }
+  .br-compact-card__metric {
+    font-size: 10px;
+  }
+  .br-result-frame {
+    height: 400px !important;
+  }
+  .br-result-pdf {
+    height: 500px !important;
+  }
 }
 </style>

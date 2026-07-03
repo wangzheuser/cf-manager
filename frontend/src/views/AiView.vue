@@ -5,12 +5,13 @@
       <!-- 欢迎页 -->
       <div v-if="messages.length === 0" style="text-align: center; padding: 40px 20px 40px;">
         <!-- AI 用量统计 (compact) -->
-        <n-grid v-if="usageData.length > 0" :cols="6" :x-gap="8" :y-gap="8" responsive="screen" style="margin-bottom: 20px; text-align: left;">
+        <div class="card-grid-scroll">
+        <n-grid v-if="usageData.length > 0" :x-gap="8" :y-gap="8" cols="1 s:2 m:4 l:6 xl:8" responsive="screen" style="margin-bottom: 20px; text-align: left;">
           <n-gi v-for="u in usageData" :key="u.accountId">
             <n-popover trigger="click" placement="bottom">
               <template #trigger>
                 <div class="ai-compact-card">
-                  <span class="ai-compact-card__name" :title="u.accountName">{{ u.accountName.length > 8 ? u.accountName.slice(0, 7) + '…' : u.accountName }}</span>
+                  <span class="ai-compact-card__name" :title="u.accountName">{{ u.accountName }}</span>
                   <n-progress
                     type="line"
                     :percentage="Math.min(u.totalNeurons / 100, 100)"
@@ -18,7 +19,7 @@
                     :rail-color="'#e8e8e8'"
                     :height="6"
                     :show-indicator="false"
-                    :style="{ flex: 1 }"
+                    :style="{ flex: '1 1 0', minWidth: '24px', overflow: 'hidden' }"
                   />
                   <span class="ai-compact-card__metric">{{ u.totalNeurons.toLocaleString() }}</span>
                 </div>
@@ -53,6 +54,7 @@
             </n-popover>
           </n-gi>
         </n-grid>
+        </div>
         <h1 style="font-size: 32px; margin-bottom: 36px; color: #1a1a1a; font-weight: 600;">有什么我能帮你的吗？</h1>
         <div style="display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; max-width: 820px; margin: 0 auto;">
           <div
@@ -445,7 +447,8 @@ watch(selectedAccount, () => {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 180px;
+  width: 100%;
+  min-width: 0;
   height: 28px;
   padding: 0 8px;
   border: 1px solid #e0e0e6;
@@ -453,6 +456,7 @@ watch(selectedAccount, () => {
   cursor: pointer;
   transition: background-color 0.2s;
   background-color: #fff;
+  box-sizing: border-box;
 }
 .ai-compact-card:hover { background-color: #f5f5f5; }
 .ai-compact-card__name {
@@ -460,14 +464,24 @@ watch(selectedAccount, () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 70px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 .ai-compact-card__metric {
   font-size: 11px;
-  color: #666;
+  color: #333;
+  font-weight: 500;
   flex-shrink: 0;
   white-space: nowrap;
+  min-width: 32px;
+  text-align: right;
+}
+
+.card-grid-scroll {
+  max-height: 200px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
 }
 
 @media (max-width: 768px) {
@@ -483,6 +497,20 @@ watch(selectedAccount, () => {
   }
   .ai-select-account {
     width: 100%;
+  }
+  .ai-compact-card {
+    width: 100%;
+    min-width: 100px;
+  }
+  .ai-compact-card__name {
+    min-width: 0;
+  }
+  .ai-compact-card__metric {
+    font-size: 10px;
+  }
+  .ai-message-bubble-user,
+  .ai-message-bubble-assistant {
+    max-width: 90%;
   }
 }
 </style>
