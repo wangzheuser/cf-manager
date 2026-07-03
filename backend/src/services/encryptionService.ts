@@ -6,7 +6,7 @@ const IV_LENGTH = 16;
 
 function getKey(): Buffer {
   if (!config.encryptionKey) {
-    throw new Error('ENCRYPTION_KEY environment variable is required');
+    console.warn('[Encryption] ENCRYPTION_KEY not set, using default key. This is insecure for production!');
   }
   // 支持两种格式：
   // 1. 64位 hex 字符串（如 openssl rand -hex 32 生成）

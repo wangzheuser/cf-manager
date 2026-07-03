@@ -2,17 +2,37 @@ import NodeCache from 'node-cache';
 import { getActiveAccounts, getActiveAccountsByFeature, Account, AccountFeature, hasFeature } from '../models/account';
 import { getCfClient } from './cfFactory';
 import { getAccountQuota, ResourceType } from './quotaTracker';
-import { getAiUsageToday } from './aiService';
+import { getQuotaTodayByResource } from '../models/quotaUsage';
 import { appLogger } from './logger';
+import pricingData from '../data/model-pricing.json';
 
 const ZONES_CACHE_TTL = 300; // 5 minutes
 const QUOTA_CACHE_TTL = 60;  // 1 minute
+const AI_CACHE_KEY = 'ai_neuron_snapshot';
+const AI_CACHE_TTL = 600; // 10 min
+
+/** Threshold for cache affinity: prefer last-used account if it's within this many neurons of the best. */
+const CACHE_AFFINITY_THRESHOLD = 10000;
+
+/** Track the last successfully used AI account for cache-affine routing. */
+let lastUsedAiAccount: { id: number; time: number } | null = null;
+
+/** Check if a model supports prompt caching (has cachedInput in pricing). */
+function modelSupportsCaching(model: string): boolean {
+  return !!(pricingData.models[model as keyof typeof pricingData.models] as any)?.cachedInput;
+}
 
 interface Zone {
   id: string;
   name: string;
   status: string;
   account: { id: string; name: string };
+}
+
+interface AiSnapshotEntry {
+  account: Account;
+  used: number;
+  _optimistic?: number;  // 乐观预估量，在 updateAiCacheAfterUsage 时修正
 }
 
 const zonesCache = new NodeCache({ stdTTL: ZONES_CACHE_TTL });
@@ -57,52 +77,101 @@ export async function findAccountByDomain(domain: string): Promise<{ account: Ac
   return { account, zoneId: zone.id };
 }
 
-const AI_NEURON_LIMIT = 10000;
-
 const RESOURCE_FEATURE_MAP: Record<ResourceType, AccountFeature> = {
   ai_neurons: 'ai',
   workers_requests: 'workers',
   browser_render_seconds: 'browser_render',
 };
 
-export async function selectBestAccount(resource: ResourceType): Promise<Account> {
+function getAiAccountSnapshot(): AiSnapshotEntry[] {
+  const cached = quotaCache.get<AiSnapshotEntry[]>(AI_CACHE_KEY);
+  if (cached) {
+    appLogger.debug(`[AccountRouter] Using cached AI snapshot: ${cached.length} accounts, first=${cached[0]?.account.name}, used=${cached[0]?.used}`);
+    return cached;
+  }
+
+  const accounts = getActiveAccountsByFeature('ai');
+  appLogger.info(`[AccountRouter] Found ${accounts.length} active accounts with AI feature`);
+  
+  const usageRows = getQuotaTodayByResource('ai_neurons');
+  const usageMap = new Map(usageRows.map(r => [r.account_id, r]));
+
+  const ranked = accounts
+    .map(account => {
+      const usage = usageMap.get(account.id);
+      const used = usage?.count || 0;
+      const exhausted = usage?.exhausted === 1;
+      appLogger.debug(`[AccountRouter] Account ${account.name}: used=${used}, exhausted=${exhausted}`);
+      return { account, used, exhausted };
+    })
+    .filter(r => !r.exhausted)
+    .sort((a, b) => a.used - b.used)
+    .map(r => ({ account: r.account, used: r.used }));
+
+  appLogger.info(`[AccountRouter] Final ranked list: ${ranked.map(r => `${r.account.name}(${r.used})`).join(', ')}`);
+
+  quotaCache.set(AI_CACHE_KEY, ranked, AI_CACHE_TTL);
+  return ranked;
+}
+
+export async function selectBestAccount(
+  resource: ResourceType,
+  excludeIds?: Set<number>,
+  model?: string
+): Promise<Account | null> {
+  if (resource === 'ai_neurons') {
+    const list = getAiAccountSnapshot();
+    // 按实际用量 + 乐观预估量排序，避免并发选中同一账户
+    list.sort((a, b) => (a.used + (a._optimistic || 0)) - (b.used + (b._optimistic || 0)));
+
+    const best = list.find(r => !excludeIds?.has(r.account.id));
+    if (!best) return null;
+
+    const supportsCaching = model ? modelSupportsCaching(model) : false;
+
+    // 缓存模型：优先复用最近使用的账户（软粘性），提升缓存命中率
+    if (supportsCaching && lastUsedAiAccount) {
+      const recent = list.find(r => r.account.id === lastUsedAiAccount!.id && !excludeIds?.has(r.account.id));
+      if (recent && recent !== best) {
+        const bestScore = best.used + (best._optimistic || 0);
+        const recentScore = (recent.used || 0) + (recent._optimistic || 0);
+        if (recentScore - bestScore <= CACHE_AFFINITY_THRESHOLD) {
+          // 粘性：recent 没比 best 贵太多，值得为了缓存命中复用
+          appLogger.debug(`[AccountRouter] Cache affinity: reusing ${recent.account.name} (gap=${recentScore - bestScore} <= ${CACHE_AFFINITY_THRESHOLD})`);
+          recent._optimistic = (recent._optimistic || 0) + 1000;
+          lastUsedAiAccount = { id: recent.account.id, time: Date.now() };
+          return recent.account;
+        }
+      }
+    }
+
+    // 选 best（无缓存 或 缓存模型但粘性不划算）
+    const selected = best;
+    selected._optimistic = (selected._optimistic || 0) + 1000;
+    if (supportsCaching) {
+      lastUsedAiAccount = { id: selected.account.id, time: Date.now() };
+    }
+    appLogger.debug(`[AccountRouter] Selected account: ${selected.account.name} (optimistic +1000, total optimistic: ${selected._optimistic})`);
+    return selected.account;
+  }
+
+  // 非 ai_neurons 分支保持原逻辑
   const cacheKey = `best_account_${resource}`;
   const cached = quotaCache.get<{ account: Account }>(cacheKey);
   if (cached) return cached.account;
 
   const feature = RESOURCE_FEATURE_MAP[resource];
   const accounts = feature ? getActiveAccountsByFeature(feature) : getActiveAccounts();
-  if (accounts.length === 0) {
-    throw Object.assign(new Error('No active accounts'), { statusCode: 400, code: 'NO_ACCOUNTS' });
-  }
+  if (accounts.length === 0) return null;
 
   let best = accounts[0];
   let bestRemaining = -1;
 
-  if (resource === 'ai_neurons') {
-    const usageResults = await Promise.all(
-      accounts.map(async (account) => {
-        try {
-          const usage = await getAiUsageToday(account);
-          return { account, remaining: AI_NEURON_LIMIT - usage.totalNeurons };
-        } catch {
-          return { account, remaining: 0 };
-        }
-      })
-    );
-    for (const { account, remaining } of usageResults) {
-      if (remaining > bestRemaining) {
-        bestRemaining = remaining;
-        best = account;
-      }
-    }
-  } else {
-    for (const account of accounts) {
-      const { remaining } = getAccountQuota(account.id, resource);
-      if (remaining > bestRemaining) {
-        bestRemaining = remaining;
-        best = account;
-      }
+  for (const account of accounts) {
+    const { remaining } = getAccountQuota(account.id, resource);
+    if (remaining > bestRemaining) {
+      bestRemaining = remaining;
+      best = account;
     }
   }
 
@@ -110,34 +179,49 @@ export async function selectBestAccount(resource: ResourceType): Promise<Account
   return best;
 }
 
-export async function getAccountsByPriority(resource: ResourceType): Promise<Account[]> {
-  const feature = RESOURCE_FEATURE_MAP[resource];
-  const accounts = feature ? getActiveAccountsByFeature(feature) : getActiveAccounts();
-  if (accounts.length === 0) return [];
-
-  if (resource === 'ai_neurons') {
-    const usageResults = await Promise.all(
-      accounts.map(async (account) => {
-        try {
-          const usage = await getAiUsageToday(account);
-          return { account, remaining: AI_NEURON_LIMIT - usage.totalNeurons };
-        } catch {
-          return { account, remaining: 0 };
-        }
-      })
-    );
-    return usageResults
-      .sort((a, b) => b.remaining - a.remaining)
-      .map(r => r.account);
-  }
-
-  return accounts
-    .map(account => ({ account, remaining: getAccountQuota(account.id, resource).remaining }))
-    .sort((a, b) => b.remaining - a.remaining)
-    .map(r => r.account);
+export function invalidateAiCache(): void {
+  quotaCache.del(AI_CACHE_KEY);
 }
 
-export function clearCache(): void {
-  zonesCache.flushAll();
-  quotaCache.flushAll();
+export function updateAiCacheAfterUsage(accountId: number, neurons: number): void {
+  const list = quotaCache.get<AiSnapshotEntry[]>(AI_CACHE_KEY);
+  if (!list) {
+    appLogger.warn(`[AccountRouter] updateAiCacheAfterUsage: cache not found for account ${accountId}`);
+    return;
+  }
+  const item = list.find(r => r.account.id === accountId);
+  if (item) {
+    const oldUsed = item.used;
+    const oldOptimistic = item._optimistic || 0;
+    // 加固用量，清除乐观预估
+    item.used += neurons;
+    delete item._optimistic;
+    // 重新按实际用量 + 剩余乐观预估排序
+    list.sort((a, b) => (a.used + (a._optimistic || 0)) - (b.used + (b._optimistic || 0)));
+    appLogger.info(`[AccountRouter] Updated cache: ${item.account.name} ${oldUsed} → ${item.used} (+${neurons} real, cleared ${oldOptimistic} optimistic), new order: ${list.map(r => `${r.account.name}(${r.used}+${r._optimistic || 0})`).join(', ')}`);
+  } else {
+    appLogger.warn(`[AccountRouter] updateAiCacheAfterUsage: account ${accountId} not found in cache`);
+  }
+}
+
+export function removeAccountFromAiCache(accountId: number): void {
+  const list = quotaCache.get<AiSnapshotEntry[]>(AI_CACHE_KEY);
+  if (!list) return;
+  const idx = list.findIndex(r => r.account.id === accountId);
+  if (idx >= 0) list.splice(idx, 1);
+}
+
+export function clearCache(resource?: ResourceType): void {
+  if (resource) {
+    if (resource === 'ai_neurons') {
+      invalidateAiCache();
+    } else {
+      const cacheKey = `best_account_${resource}`;
+      quotaCache.del(cacheKey);
+    }
+  } else {
+    // Clear all caches (backward compatibility)
+    zonesCache.flushAll();
+    quotaCache.flushAll();
+  }
 }

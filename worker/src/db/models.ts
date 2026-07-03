@@ -24,6 +24,8 @@ export interface QuotaUsage {
   resource: string;
   date: string;
   count: number;
+  optimistic: number;
+  exhausted: number;
 }
 
 export interface AuditLogRow {
@@ -198,6 +200,28 @@ export async function getQuotaByAccount(db: D1Database, accountId: number, resou
     .bind(accountId, resource, today).first<QuotaUsage>();
 }
 
+export async function setExhausted(db: D1Database, accountId: number, resource: string): Promise<void> {
+  const today = new Date().toISOString().split('T')[0];
+  await db.prepare(
+    `INSERT INTO quota_usage (account_id, resource, date, count, exhausted) VALUES (?, ?, ?, 0, 1)
+     ON CONFLICT(account_id, resource, date) DO UPDATE SET exhausted = 1`
+  ).bind(accountId, resource, today).run();
+}
+
+export async function clearExhausted(db: D1Database, accountId: number, resource: string): Promise<void> {
+  const today = new Date().toISOString().split('T')[0];
+  await db.prepare(
+    `UPDATE quota_usage SET exhausted = 0 WHERE account_id = ? AND resource = ? AND date = ?`
+  ).bind(accountId, resource, today).run();
+}
+
+export async function getQuotaTodayByResource(db: D1Database, resource: string): Promise<QuotaUsage[]> {
+  const today = new Date().toISOString().split('T')[0];
+  const { results } = await db.prepare('SELECT * FROM quota_usage WHERE resource = ? AND date = ?')
+    .bind(resource, today).all<QuotaUsage>();
+  return results;
+}
+
 // ============ Audit log ============
 
 export async function addAuditLog(db: D1Database, data: {
@@ -226,4 +250,34 @@ export async function getSetting(db: D1Database, key: string): Promise<string | 
 
 export async function setSetting(db: D1Database, key: string, value: string): Promise<void> {
   await db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').bind(key, value).run();
+}
+
+// ============ Optimistic tracking (D1 fallback) ============
+
+/** Atomically increment optimistic count for a given account+resource. */
+export async function addOptimisticD1(db: D1Database, accountId: number, resource: string, amount: number): Promise<void> {
+  const today = new Date().toISOString().split('T')[0];
+  await db.prepare(
+    `INSERT INTO quota_usage (account_id, resource, date, count, optimistic) VALUES (?, ?, ?, 0, ?)
+     ON CONFLICT(account_id, resource, date) DO UPDATE SET optimistic = optimistic + ?`
+  ).bind(accountId, resource, today, amount, amount).run();
+}
+
+/** Clear optimistic for a given account+resource after real usage is recorded. */
+export async function clearOptimisticD1(db: D1Database, accountId: number, resource: string): Promise<void> {
+  const today = new Date().toISOString().split('T')[0];
+  await db.prepare(
+    'UPDATE quota_usage SET optimistic = 0 WHERE account_id = ? AND resource = ? AND date = ?'
+  ).bind(accountId, resource, today).run();
+}
+
+/** Get all optimistic values for a resource, keyed by account_id. */
+export async function getOptimisticMapD1(db: D1Database, resource: string): Promise<Map<number, number>> {
+  const today = new Date().toISOString().split('T')[0];
+  const { results } = await db.prepare(
+    'SELECT account_id, optimistic FROM quota_usage WHERE resource = ? AND date = ?'
+  ).bind(resource, today).all<{ account_id: number; optimistic: number }>();
+  const map = new Map<number, number>();
+  for (const r of results) map.set(r.account_id, r.optimistic || 0);
+  return map;
 }

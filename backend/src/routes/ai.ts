@@ -1,115 +1,76 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { selectBestAccount, getAccountsByPriority, clearCache } from '../services/accountRouter';
-import { getAccountById } from '../models/account';
-import { getAvailableModels, runInferenceStream, getAiUsageToday } from '../services/aiService';
-import { getActiveAccountsByFeature } from '../models/account';
-import { setQuota } from '../models/quotaUsage';
-import { appLogger } from '../services/logger';
+import { Account } from '../models/account';
+import { getActiveAccounts } from '../models/account';
+import { getAiUsageToday } from '../services/aiService';
+import { setQuota, clearExhausted, getQuotaByAccount } from '../models/quotaUsage';
+import { invalidateAiCache } from '../services/accountRouter';
 
 const router = Router();
 
-router.get('/models', async (req, res, next) => {
-  try {
-    const accountId = req.query.accountId ? Number(req.query.accountId) : undefined;
-    const account = accountId ? getAccountById(accountId) : await selectBestAccount('ai_neurons');
-    if (!account) {
-      throw Object.assign(new Error(`Account ${accountId} not found`), { statusCode: 404 });
-    }
-    const taskFilter = req.query.task as string | undefined;
-    const models = await getAvailableModels(account, taskFilter);
-    res.json(models);
-  } catch (err) { next(err); }
-});
-
-router.post('/inference', async (req, res, next) => {
-  try {
-    const { model, prompt, messages: historyMessages, accountId } = req.body;
-
-    if (accountId) {
-      const account = getAccountById(accountId);
-      if (!account) {
-        throw Object.assign(new Error(`Account ${accountId} not found`), { statusCode: 404 });
-      }
-      return startStream(account);
-    }
-
-    const accounts = await getAccountsByPriority('ai_neurons');
-    if (accounts.length === 0) {
-      throw Object.assign(new Error('No active accounts'), { statusCode: 503, code: 'NO_ACCOUNTS' });
-    }
-
-    async function startStream(account: any) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.flushHeaders();
-
-      await runInferenceStream(
-        account, model, prompt, historyMessages,
-        (chunk) => { res.write(`data: ${JSON.stringify({ type: 'content', chunk })}\n\n`); },
-        (chunk) => { res.write(`data: ${JSON.stringify({ type: 'reasoning', chunk })}\n\n`); },
-        () => { res.write('data: [DONE]\n\n'); res.end(); },
-        (err) => { res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`); res.end(); }
-      );
-    }
-
-    function ensureSSEHeaders() {
-      if (!res.headersSent) {
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
-        res.flushHeaders();
-      }
-    }
-
-    async function tryWithFallback(idx: number): Promise<void> {
-      const account = accounts[idx];
-      return new Promise<void>((resolve) => {
-        runInferenceStream(
-          account, model, prompt, historyMessages,
-          (chunk) => { ensureSSEHeaders(); res.write(`data: ${JSON.stringify({ type: 'content', chunk })}\n\n`); },
-          (chunk) => { ensureSSEHeaders(); res.write(`data: ${JSON.stringify({ type: 'reasoning', chunk })}\n\n`); },
-          () => { ensureSSEHeaders(); res.write('data: [DONE]\n\n'); res.end(); resolve(); },
-          async (err) => {
-            const is4006 = err.message.includes('4006') || err.message.includes('daily free allocation');
-            if (is4006) {
-              setQuota(account.id, 'ai_neurons', 10000);
-              clearCache();
-            }
-            if (is4006 && idx + 1 < accounts.length) {
-              appLogger.warn(`[AI] Account ${account.name} neuron limit (4006), switching...`);
-              await tryWithFallback(idx + 1);
-              resolve();
-            } else {
-              ensureSSEHeaders();
-              res.write(`data: ${JSON.stringify({ error: is4006 ? 'ALL_ACCOUNTS_EXHAUSTED: 所有账户神经元已耗尽' : err.message })}\n\n`);
-              res.end();
-              resolve();
-            }
-          }
-        );
-      });
-    }
-
-    await tryWithFallback(0);
-  } catch (err) { next(err); }
-});
-
+/**
+ * GET /api/ai/usage
+ * 获取所有活跃账户的 AI 使用量统计（同步路径，CF 权威校准）
+ *
+ * - 并发 getAiUsageToday(每个活跃账户)
+ * - 成功的账户：setQuota(CF 权威值) + clearExhausted + invalidateAiCache
+ * - 失败的账户：跳过（不更新，保留本地估算）
+ */
 router.get('/usage', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const accounts = getActiveAccountsByFeature('ai');
-    const results = await Promise.all(
-      accounts.map(async (account) => {
-        try {
-          const usage = await getAiUsageToday(account);
-          return { accountId: account.id, accountName: account.name, ...usage };
-        } catch (err) {
-          appLogger.error(`[AI Usage] Failed for account ${account.name}: ${err}`);
-          return { accountId: account.id, accountName: account.name, totalNeurons: 0, models: [] };
+    const today = new Date().toISOString().split('T')[0];
+    const accounts = getActiveAccounts().filter(a => a.account_id) as Account[];
+
+    const promises = accounts.map(async (account) => {
+      try {
+        const usage = await getAiUsageToday(account as Account);
+        
+        // 当 CF 返回非零值：使用 CF 数据并更新本地
+        if (usage.totalNeurons > 0) {
+          setQuota(account.id, 'ai_neurons', usage.totalNeurons);
+          clearExhausted(account.id, 'ai_neurons');
+          return {
+            accountId: account.account_id,
+            accountName: account.name,
+            totalNeurons: usage.totalNeurons,
+            models: usage.models,
+          };
+        } else {
+          // CF 返回 0 或负数：回退到本地数据库的值
+          console.warn(`[AI Usage] CF returned 0 for ${account.name}, using local estimate`);
+          const localQuota = getQuotaByAccount(account.id, 'ai_neurons', today);
+          return {
+            accountId: account.account_id,
+            accountName: account.name,
+            totalNeurons: localQuota?.count || 0,
+            models: [],
+            warning: 'CF returned 0, using local estimate'
+          };
         }
-      })
-    );
-    res.json(results);
+      } catch (err: any) {
+        console.error(`[AI Usage] Failed for ${account.name}:`, err.message);
+        // CF 调用失败：返回本地数据库的值
+        const localQuota = getQuotaByAccount(account.id, 'ai_neurons', today);
+        return {
+          accountId: account.account_id,
+          accountName: account.name,
+          totalNeurons: localQuota?.count || 0,
+          models: [],
+          warning: 'Failed to fetch from CF, using local estimate'
+        };
+      }
+    });
+
+    const results = await Promise.allSettled(promises);
+
+    // 提取成功的结果，过滤掉失败的
+    const result = results
+      .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled' && r.value !== null)
+      .map(r => r.value);
+
+    // 同步完成后全量刷新内存缓存
+    invalidateAiCache();
+
+    res.json(result);
   } catch (err) { next(err); }
 });
 

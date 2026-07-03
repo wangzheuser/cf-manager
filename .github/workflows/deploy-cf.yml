@@ -21,6 +21,11 @@ on:
         required: false
         default: 'cfmgr'
         type: string
+      kv_namespace_name:
+        description: 'KV 命名空间名称（用于缓存和粘性路由）'
+        required: false
+        default: 'cfmgr'
+        type: string
       encryption_key:
         description: '加密密钥（用于加密存储 API Token）'
         required: false
@@ -36,6 +41,11 @@ on:
         required: false
         default: ''
         type: string
+      full_wipe:
+        description: '完全覆盖：删除并重建 D1 数据库 + 清空 KV 命名空间'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -62,7 +72,16 @@ jobs:
         run: |
           DB_NAME="${{ github.event.inputs.d1_database_name }}"
 
-          # 从 wrangler d1 list 中提取 UUID（格式：xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）
+          # --- 完全覆盖：删除旧数据库 ---
+          if [ "${{ github.event.inputs.full_wipe }}" = "true" ]; then
+            echo "完全覆盖模式：尝试删除旧 D1 数据库..."
+            DB_OLD_ID=$(wrangler d1 list 2>/dev/null | grep "$DB_NAME" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' || echo "")
+            if [ -n "$DB_OLD_ID" ]; then
+              wrangler d1 delete "$DB_NAME" --force 2>/dev/null || echo "删除失败，继续..."
+              sleep 2
+            fi
+          fi
+
           DB_ID=$(wrangler d1 list 2>/dev/null | grep "$DB_NAME" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' || echo "")
 
           if [ -z "$DB_ID" ]; then
@@ -75,9 +94,48 @@ jobs:
             wrangler d1 execute "$DB_NAME" --file=worker/src/db/schema.sql --remote
           else
             echo "Database already exists: $DB_NAME (ID: $DB_ID)"
+            if [ "${{ github.event.inputs.full_wipe }}" = "true" ]; then
+              echo "重新初始化数据库 Schema..."
+              wrangler d1 execute "$DB_NAME" --file=worker/src/db/schema.sql --remote
+            fi
           fi
 
           echo "database_id=$DB_ID" >> $GITHUB_OUTPUT
+
+      - name: Run D1 migrations
+        run: |
+          DB_NAME="${{ github.event.inputs.d1_database_name }}"
+          # 为旧表添加新列（已存在则静默失败）
+          wrangler d1 execute "$DB_NAME" --command="ALTER TABLE quota_usage ADD COLUMN optimistic INTEGER DEFAULT 0" --remote 2>/dev/null || true
+
+      - name: Setup KV namespace
+        id: kv
+        run: |
+          KV_NAME="${{ github.event.inputs.kv_namespace_name }}"
+
+          # --- 完全覆盖：清空 KV ---
+          if [ "${{ github.event.inputs.full_wipe }}" = "true" ]; then
+            echo "完全覆盖模式：清空 KV 命名空间..."
+            # 先删除旧的 namespace（wrangler 会提示绑定丢失，不影响重建）
+            KV_OLD_ID=$(wrangler kv:namespace list 2>/dev/null | grep "$KV_NAME" | grep -oE '[0-9a-f]{32}' || echo "")
+            if [ -n "$KV_OLD_ID" ]; then
+              wrangler kv:namespace delete --namespace-id "$KV_OLD_ID" --force 2>/dev/null || echo "KV 删除失败或不存在，继续..."
+              sleep 2
+            fi
+          fi
+
+          KV_ID=$(wrangler kv:namespace list 2>/dev/null | grep "$KV_NAME" | grep -oE '[0-9a-f]{32}' || echo "")
+
+          if [ -z "$KV_ID" ]; then
+            echo "Creating KV namespace: $KV_NAME"
+            KV_OUTPUT=$(wrangler kv:namespace create "$KV_NAME" 2>&1)
+            KV_ID=$(echo "$KV_OUTPUT" | grep -oE '[0-9a-f]{32}' | head -1)
+            echo "Created KV namespace with ID: $KV_ID"
+          else
+            echo "KV namespace already exists: $KV_NAME (ID: $KV_ID)"
+          fi
+
+          echo "kv_namespace_id=$KV_ID" >> $GITHUB_OUTPUT
 
       - name: Update wrangler.toml
         working-directory: worker
@@ -85,6 +143,7 @@ jobs:
           sed -i '/^main = /d' wrangler.toml
           sed -i '/^\[vars\]/,/^$/d' wrangler.toml
           sed -i "s/database_id = \".*\"/database_id = \"${{ steps.d1.outputs.database_id }}\"/" wrangler.toml
+          sed -i "s/id = \"YOUR_KV_NAMESPACE_ID\"/id = \"${{ steps.kv.outputs.kv_namespace_id }}\"/" wrangler.toml
           sed -i "s/^name = \".*\"/name = \"${{ github.event.inputs.project_name }}\"/" wrangler.toml
 
       - name: Install worker dependencies
@@ -109,6 +168,13 @@ jobs:
             echo "${{ github.event.inputs.demo_account_ids }}" | wrangler pages secret put DEMO_ACCOUNT_IDS --project-name "${{ github.event.inputs.project_name }}"
           fi
 
+      - name: Bind KV to Pages project
+        run: |
+          echo "Binding KV namespace to Pages project..."
+          wrangler pages deployment set-kv-bindings --project-name "${{ github.event.inputs.project_name }}" \
+            --kv-namespace "${{ github.event.inputs.kv_namespace_name }}" \
+            --binding-name KV 2>/dev/null || echo "KV binding 设置失败或已存在"
+
       - name: Deploy to Cloudflare Pages
         working-directory: worker
         run: wrangler pages deploy public/ --project-name "${{ github.event.inputs.project_name }}" --branch main --commit-dirty=true
@@ -122,9 +188,7 @@ jobs:
           echo "| CF 邮箱 | ${{ github.event.inputs.cf_email }} |" >> $GITHUB_STEP_SUMMARY
           echo "| CF API Key | ${{ github.event.inputs.cf_api_key }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Pages 项目 | ${{ github.event.inputs.project_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| D1 数据库 | ${{ github.event.inputs.d1_database_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Database ID | ${{ steps.d1.outputs.database_id }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| ENCRYPTION_KEY | ${{ github.event.inputs.encryption_key }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| API_SECRET | ${{ github.event.inputs.api_secret }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| DEMO_ACCOUNT_IDS | ${{ github.event.inputs.demo_account_ids }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| D1 数据库 | ${{ github.event.inputs.d1_database_name }} (${{ steps.d1.outputs.database_id }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| KV 命名空间 | ${{ github.event.inputs.kv_namespace_name }} (${{ steps.kv.outputs.kv_namespace_id }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 完全覆盖 | ${{ github.event.inputs.full_wipe }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 访问地址 | https://${{ github.event.inputs.project_name }}.pages.dev/admin/ |" >> $GITHUB_STEP_SUMMARY

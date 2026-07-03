@@ -8,6 +8,10 @@ binding = "DB"
 database_name = "cf-manager"
 database_id = "YOUR_D1_DATABASE_ID"
 
+[[kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
 [vars]
 API_SECRET = ""
 ENCRYPTION_KEY = ""
