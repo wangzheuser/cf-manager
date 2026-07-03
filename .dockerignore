@@ -1,0 +1,15 @@
+node_modules
+*/node_modules
+**/node_modules
+.git
+*.md
+.env
+.env.*
+!.env.example
+data/
+backend/dist
+frontend/dist
+docker/backend/Dockerfile
+*.log
+.cursor
+.vscode
