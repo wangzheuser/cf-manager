@@ -48,6 +48,11 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # 非交互 CI 下，wrangler 必须通过环境变量认证。
+    # 输入的是 Cloudflare Global API Key，对应 wrangler 的 legacy 变量 CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL。
+    env:
+      CLOUDFLARE_API_KEY: ${{ github.event.inputs.cf_api_key }}
+      CLOUDFLARE_EMAIL: ${{ github.event.inputs.cf_email }}
     steps:
       - uses: actions/checkout@v5
 
