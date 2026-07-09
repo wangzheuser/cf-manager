@@ -14,6 +14,7 @@
 ### 🎨 前端
 
 - **部署对话框区分密钥与配置项**：`StoreDeployDialog` 将 `secret !== false` 的 var 归为「需要填写的密钥」（密码框），`secret === false` 的 var 归为「需要填写的配置项」（普通文本框），并纳入部署校验（e81bae2）。
+- **R2 预拉取误报**：`StoreDeployDialog` 改为**只拉取当前模板实际用到的资源类型**（按 `template.bindings` 过滤 kv/d1/r2），避免对未开通 R2 的账号无谓调用 R2 API 而误报 “R2 is not enabled”（08c5700）。
 
 ---
 
