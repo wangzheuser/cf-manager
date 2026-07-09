@@ -9,10 +9,11 @@
  * backend/src/services/ 与 worker/src/services/，两端共用，避免规则漂移。
  * 修改校验逻辑请改这里和 catalog.schema.json，然后重新运行同步脚本。
  */
-import Ajv2020, { type ErrorObject } from 'ajv/dist/2020';
-import addFormats from 'ajv-formats';
-import addErrors from 'ajv-errors';
-import schema from './catalog.schema.json';
+import type { ErrorObject } from 'ajv/dist/2020';
+// 校验器由 scripts/gen-catalog-validator.js 在构建期用 ajv standalone 预编译生成
+// （catalogValidate.generated.ts），运行时不再调用 new Function，以兼容 Cloudflare
+// Workers / Pages（其运行时禁止动态代码生成）。请勿在此处直接 ajv.compile。
+import validateSchema from './catalogValidate.generated';
 
 export interface ValidationResult {
   valid: boolean;
@@ -62,11 +63,6 @@ export interface Catalog {
   defaultLanguage?: string;
   templates: CatalogTemplate[];
 }
-
-const ajv = new Ajv2020({ allErrors: true, strict: false });
-addFormats(ajv);
-addErrors(ajv);
-const validateSchema = ajv.compile(schema);
 
 function label(e: ErrorObject): string {
   if (e.keyword === 'required') {

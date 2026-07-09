@@ -3,7 +3,10 @@ const fs = require('fs');
 const path = require('path');
 
 const OBFUSCATE_FRONTEND = process.env.OBFUSCATE_FRONTEND === 'true';
-const OBFUSCATE_WORKER = process.env.OBFUSCATE_WORKER !== 'false';
+// Worker 混淆默认关闭：javascript-obfuscator 的字符串数组解码等在 Cloudflare Workers /
+// Pages 运行时可能触发 "Code generation from strings disallowed"（new Function / eval 被禁）。
+// 浏览器端的前端混淆不受影响。如需对 worker 混淆，请确认混淆选项不再生成动态代码。
+const OBFUSCATE_WORKER = process.env.OBFUSCATE_WORKER === 'true';
 
 let JavaScriptObfuscator;
 if (OBFUSCATE_FRONTEND || OBFUSCATE_WORKER) {
@@ -92,7 +95,7 @@ execSync('node ../scripts/gen-version.js', { cwd: __dirname, stdio: 'inherit' })
 
 console.log(`\nObfuscation: frontend=${OBFUSCATE_FRONTEND ? 'ON' : 'OFF'}, worker=${OBFUSCATE_WORKER ? 'ON' : 'OFF'}`);
 console.log(`  Set OBFUSCATE_FRONTEND=true to enable frontend obfuscation`);
-console.log(`  Set OBFUSCATE_WORKER=false to disable worker obfuscation\n`);
+console.log(`  Set OBFUSCATE_WORKER=true to enable worker obfuscation (may break on Cloudflare)\n`);
 
 console.log(`[${++step}/${totalSteps}] Installing frontend dependencies...`);
 execSync('npm install', { cwd: frontendDir, stdio: 'inherit' });

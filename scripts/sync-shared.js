@@ -13,6 +13,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
 
@@ -73,4 +74,17 @@ for (const job of jobs) {
 if (failed) {
   process.exit(1);
 }
+
+// 额外：用 ajv standalone 预编译 catalog 校验器（运行时避免 new Function，兼容
+// Cloudflare Workers / Pages）。从 backend 目录运行以保证能解析到 ajv 依赖。
+try {
+  execSync('node ' + path.join(__dirname, 'gen-catalog-validator.js'), {
+    cwd: path.join(root, 'backend'),
+    stdio: 'inherit',
+  });
+} catch (e) {
+  console.error('[sync-shared] ERROR: failed to generate catalog validator');
+  process.exit(1);
+}
+
 console.log('[sync-shared] done');

@@ -28,8 +28,10 @@ worker/src/data/
 # Ignore generated catalog schema + validator (managed by sync-shared script)
 backend/src/services/catalog.schema.json
 backend/src/services/catalogValidator.ts
+backend/src/services/catalogValidate.generated.ts
 worker/src/services/catalog.schema.json
 worker/src/services/catalogValidator.ts
+worker/src/services/catalogValidate.generated.ts
 
 # Ignore generated version files (managed by gen-version script)
 worker/src/version.ts
