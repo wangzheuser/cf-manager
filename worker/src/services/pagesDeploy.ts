@@ -165,33 +165,40 @@ export async function deployPages(
   }
 
   const manifest: Record<string, string> = {};
-  const deployForm = new FormData();
-  const specialFiles: Array<{ name: string; buffer: Uint8Array }> = [];
+  const assetFiles: Array<{ path: string; buffer: Uint8Array; contentType: string }> = [];
+  const specialFiles: Array<{ name: string; buffer: Uint8Array; contentType: string }> = [];
 
+  // 第一遍：遍历文件、计算哈希并分类（不操作 FormData，以便后面按 backend 顺序构建 multipart）。
   for (const f of files) {
     const basename = f.path.split('/').pop() || f.path;
     if (SPECIAL_FILES.has(basename) && !f.path.includes('/')) {
-      specialFiles.push({ name: basename, buffer: f.buffer });
+      specialFiles.push({ name: basename, buffer: f.buffer, contentType: getContentType(basename) });
     } else {
-      // 普通资源路径加前导斜杠，与 wrangler / backend deployPages 约定一致（"/index.html"）；
-      // manifest key 与 multipart 字段名必须同步且一致，哈希用 BLAKE3（与 backend 同款）。
       const assetPath = '/' + f.path;
       const hash = await computePageAssetHash(f.buffer, assetPath);
       manifest[assetPath] = hash;
-      deployForm.append(assetPath, new Blob([f.buffer], { type: getContentType(assetPath) }), assetPath);
+      assetFiles.push({ path: assetPath, buffer: f.buffer, contentType: getContentType(assetPath) });
     }
   }
 
+  const deployForm = new FormData();
+
+  // multipart 字段顺序与 backend SDK 的 createForm 一致：
+  //   account_id → manifest → branch → commit_hash → commit_message → commit_dirty → [文件] → [特殊文件]
+  // Cloudflare API 可能对顺序敏感（manifest 必须在文件之前才能正确关联）。
+  deployForm.append('account_id', account.account_id);
   deployForm.append('manifest', JSON.stringify(manifest));
   deployForm.append('branch', opts.branch || 'main');
-  // direct upload 必需元数据：告知 Cloudflare 这是直接上传、无需构建。
-  // backend 经官方 SDK 会自动带上这两字段；缺失时 Cloudflare 可能把部署当成需要构建的部署而内部失败，访问即 500。
   deployForm.append('commit_hash', 'direct-upload');
-  deployForm.append('commit_dirty', 'false');
   deployForm.append('commit_message', opts.commitMessage || 'Deploy via CF Manager');
+  deployForm.append('commit_dirty', 'false');
+
+  for (const af of assetFiles) {
+    deployForm.append(af.path, new Blob([af.buffer], { type: af.contentType }), af.path);
+  }
 
   for (const sf of specialFiles) {
-    deployForm.append(sf.name, new Blob([sf.buffer], { type: getContentType(sf.name) }), sf.name);
+    deployForm.append(sf.name, new Blob([sf.buffer], { type: sf.contentType }), sf.name);
   }
 
   const resp = await cfFetchRaw(
